@@ -82,6 +82,7 @@ local function newServer(context)
     self.commandNeedsReconnect = false
     self.replyNeedsReconnect = false
     self.needsRebind = false
+    self.busy = false
     self.dispatch:resetAuth()
   end
 
@@ -232,16 +233,45 @@ local function newServer(context)
     self.replyQueue = {}
   end
 
-  local function handleOneCommand()
-    local line = table.remove(self.commandQueue, 1)
-    if not line then
+  local function queueReply(reply)
+    self.replyQueue[#self.replyQueue + 1] = encodeReply(reply)
+  end
+
+  local function dispatchLine(line, generation)
+    local ok, reply = LrTasks.pcall(self.dispatch.handle, self.dispatch, line)
+    -- A rebind resets busy and the queues; a stale task must not touch them.
+    if not self.running or generation ~= self.generation then
       return
     end
-    local ok, reply = LrTasks.pcall(self.dispatch.handle, self.dispatch, line)
+    self.busy = false
     if ok then
-      self.replyQueue[#self.replyQueue + 1] = encodeReply(reply)
+      queueReply(reply)
     else
       Log.error('dispatch failed: ' .. tostring(reply))
+    end
+  end
+
+  local function runCommandInTask(line)
+    local generation = self.generation
+    self.busy = true
+    LrTasks.startAsyncTask(function()
+      dispatchLine(line, generation)
+    end, 'lrcli command')
+  end
+
+  local function handleOneCommand()
+    local index = Dispatch.nextIndex(self.commandQueue, self.busy)
+    if not index then
+      return
+    end
+    local line = table.remove(self.commandQueue, index)
+    if Dispatch.isPing(line) then
+      local ok, reply = LrTasks.pcall(self.dispatch.handle, self.dispatch, line)
+      if ok then
+        queueReply(reply)
+      end
+    else
+      runCommandInTask(line)
     end
   end
 

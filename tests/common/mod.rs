@@ -131,7 +131,7 @@ impl FakePlugin {
                     "hang" => continue,
                     other if s.canned.lock().unwrap().contains_key(other) => {
                         let body = s.canned.lock().unwrap()[other].clone();
-                        canned_reply(&id, body)
+                        canned_reply(&id, materialize_files(body, &args))
                     }
                     other => error(
                         &id,
@@ -205,6 +205,28 @@ impl FakePlugin {
             self.stats.command_conns.load(Ordering::SeqCst),
         )
     }
+}
+
+/// Replaces `{dir}` in a canned body with the request's `dir` and writes a
+/// tiny mid-grey JPEG at every `photos[].file`, as the real plugin would.
+fn materialize_files(body: Value, args: &Value) -> Value {
+    let Some(dir) = args["dir"].as_str() else {
+        return body;
+    };
+    let body: Value = serde_json::from_str(&body.to_string().replace("{dir}", dir)).unwrap();
+    for photo in body["photos"].as_array().into_iter().flatten() {
+        if let Some(file) = photo["file"].as_str() {
+            write_grey_jpeg(Path::new(file));
+        }
+    }
+    body
+}
+
+pub fn write_grey_jpeg(path: &Path) {
+    let image = image::RgbImage::from_pixel(10, 6, image::Rgb([128, 128, 128]));
+    image
+        .save_with_format(path, image::ImageFormat::Jpeg)
+        .unwrap();
 }
 
 fn canned_reply(id: &Value, body: Value) -> Value {

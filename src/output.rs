@@ -326,6 +326,51 @@ pub fn info(value: &Value) -> String {
         .join("\n\n")
 }
 
+fn max_percent(stats: &Value, kind: &str) -> Option<f64> {
+    let channels = stats.pointer(&format!("/clipping/{kind}"))?;
+    ["r", "g", "b"]
+        .iter()
+        .filter_map(|c| channels.get(*c).and_then(Value::as_f64))
+        .reduce(f64::max)
+}
+
+fn preview_line(photo: &Value) -> String {
+    let name = str_at(photo, "filename").unwrap_or("?");
+    let id = photo
+        .get("id")
+        .map_or_else(|| "?".to_string(), Value::to_string);
+    let Some(file) = str_at(photo, "file") else {
+        return format!(
+            "{name} ({id})  error: {}",
+            str_at(photo, "error").unwrap_or("no preview was produced")
+        );
+    };
+    let mut line = format!("{name} ({id})  {file}");
+    if let Some(stats) = photo.get("stats") {
+        let dimension = |key| stats.get(key).and_then(Value::as_u64);
+        if let Some((width, height)) = dimension("width").zip(dimension("height")) {
+            line.push_str(&format!("  {width}×{height}"));
+        }
+        if let Some(mean) = stats.get("meanLuminance").and_then(Value::as_f64) {
+            line.push_str(&format!("  mean {mean:.2}"));
+        }
+        if let Some((high, low)) =
+            max_percent(stats, "highlights").zip(max_percent(stats, "shadows"))
+        {
+            line.push_str(&format!("  clip hi {high:.1}% lo {low:.1}%"));
+        }
+    }
+    line
+}
+
+pub fn preview(value: &Value) -> String {
+    let mut lines: Vec<String> = photos_of(value).iter().map(preview_line).collect();
+    if str_at(value, "mode") == Some("thumbnail") {
+        lines.push("(fast preview: may not reflect recent edits)".to_string());
+    }
+    lines.join("\n")
+}
+
 pub fn raw(value: &Value) -> String {
     serde_json::to_string_pretty(value).expect("serializing a Value cannot fail")
 }
@@ -411,6 +456,31 @@ mod tests {
             search(&json!({ "total": 0, "offset": 0, "photos": [] })),
             "No photos match."
         );
+    }
+
+    #[test]
+    fn preview_lines_show_stats_errors_and_the_fast_note() {
+        let reply = json!({
+            "mode": "thumbnail",
+            "photos": [
+                { "id": 149, "filename": "DSC08011-2.ARW", "file": "/p/lrcli-x.jpg", "error": null,
+                  "stats": { "width": 1600, "height": 1067, "meanLuminance": 0.42,
+                    "clipping": {
+                      "highlights": { "r": 0.3, "g": 0.1, "b": 0.0, "luma": 0.0 },
+                      "shadows": { "r": 1.2, "g": 0.9, "b": 1.1, "luma": 0.8 } } } },
+                { "id": 7, "filename": "v.mov", "file": null, "error": "Videos cannot be previewed." },
+                { "id": 8, "filename": "b.cr3", "file": "/p/b.jpg", "error": null },
+            ],
+        });
+        let text = preview(&reply);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines[0],
+            "DSC08011-2.ARW (149)  /p/lrcli-x.jpg  1600×1067  mean 0.42  clip hi 0.3% lo 1.2%"
+        );
+        assert_eq!(lines[1], "v.mov (7)  error: Videos cannot be previewed.");
+        assert_eq!(lines[2], "b.cr3 (8)  /p/b.jpg");
+        assert_eq!(lines[3], "(fast preview: may not reflect recent edits)");
     }
 
     #[test]

@@ -8,9 +8,12 @@ use clap::{Args, Parser, Subcommand};
 
 use lrcli::broker;
 use lrcli::commands::photos::{self, Rating, SearchOptions};
+use lrcli::commands::preview::{self, PreviewOptions};
 use lrcli::commands::{self, Context};
 use lrcli::error::Error;
 use lrcli::paths::Paths;
+
+const DEFAULT_TIMEOUT_SECS: f64 = 30.0;
 
 const ABOUT_EXAMPLES: &str = "\
 Examples:
@@ -20,6 +23,7 @@ Examples:
   lrcli search --rating '>=4' --flag picked
                                Find photos in the catalog
   lrcli info --photo 123       Show a photo's metadata
+  lrcli preview --photo 123    Render a JPEG preview of a photo with its edits
 
 How it works:
   The lrcli plugin runs inside Lightroom Classic and starts one long-lived
@@ -46,9 +50,9 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
-    /// Seconds to wait for each request to be answered
-    #[arg(long, global = true, value_name = "SECS", default_value = "30", value_parser = parse_secs)]
-    timeout: f64,
+    /// Seconds to wait for each request to be answered [default: 30; `preview` scales with the batch]
+    #[arg(long, global = true, value_name = "SECS", value_parser = parse_secs)]
+    timeout: Option<f64>,
 
     /// Seconds to wait for the broker connection to open
     #[arg(long, global = true, value_name = "SECS", default_value = "2", value_parser = parse_secs)]
@@ -179,6 +183,51 @@ JSON output:
         #[arg(long)]
         develop: bool,
     },
+
+    /// Render JPEG previews of photos (with current edits) and report their stats
+    #[command(after_help = "\
+Renders each photo to a JPEG you can open or view directly, so you can judge
+an edit without leaving the terminal. Without --photo or --photos, acts on
+Lightroom's current selection (at most 50 photos per call). Files are written
+to $LRCLI_HOME/previews/<YYYYmmdd-HHMMSS>-<pid>/ (UTC; ~/.lrcli by default).
+Only the 20 most recent batch directories are kept.
+
+By default Lightroom exports each photo (sRGB, JPEG quality 80, long edge
+--size pixels, no sharpening, location stripped). This always reflects the
+current edits but takes about 1-2 seconds per photo. With --fast, Lightroom's
+cached preview is used instead: it is quick, but it can be stale after recent
+edits and may not match --size, so every result is marked possiblyStale.
+
+Unless --no-stats is given, each preview is analysed: width and height, mean
+luminance (0 to 1, Rec. 709 weights on sRGB values), and clipping as the
+percentage of pixels at 255 (highlights) or 0 (shadows) per channel and in
+luminance. --histogram adds 256-bin histograms (luma, r, g, b). Human output
+shows the worst clipped channel as `hi` and `lo`.
+
+The request timeout defaults to 30 s plus 5 s per photo (120 s for the
+selection); --timeout overrides it. A photo that fails (for example a video)
+is reported on its own line and does not stop the others. Exit 0 if at least
+one preview was produced; exit 1 if every photo failed.
+
+Examples:
+  lrcli preview --photo 149
+  lrcli preview --photo 149 --photo 150 --size 2048
+  lrcli search --rating '>=4' --ids | lrcli preview --photos -
+  lrcli preview --fast --no-stats
+  lrcli --json preview --photo 149 --histogram
+
+JSON output:
+  {\"ok\":true,\"target\":\"ids\",\"mode\":\"export\",\"size\":1600,
+   \"dir\":\"/Users/me/.lrcli/previews/20240531-100000-123\",
+   \"photos\":[{\"filename\":\"IMG_0001.CR3\",\"id\":149,\"error\":null,
+     \"file\":\"/Users/me/.lrcli/previews/20240531-100000-123/lrcli-IMG_0001.jpg\",
+     \"stats\":{\"width\":1600,\"height\":1067,\"meanLuminance\":0.42,
+       \"clipping\":{\"highlights\":{\"r\":0.3,\"g\":0.1,\"b\":0.0,\"luma\":0.0},
+                    \"shadows\":{\"r\":1.2,\"g\":0.9,\"b\":1.1,\"luma\":0.8}}}}]}
+  mode is \"thumbnail\" with --fast, and each photo then has \"possiblyStale\":true.
+  A photo that failed has \"file\":null and an \"error\" message. \"histograms\"
+  is added under \"stats\" with --histogram.")]
+    Preview(Box<PreviewArgs>),
 
     /// Install, remove, or locate the Lightroom Classic plugin
     #[command(
@@ -315,6 +364,28 @@ struct SearchArgs {
 }
 
 #[derive(Args)]
+struct PreviewArgs {
+    #[command(flatten)]
+    target: TargetArgs,
+
+    /// Long edge of the preview in pixels (64 to 4096)
+    #[arg(long, value_name = "N", default_value_t = preview::DEFAULT_SIZE, value_parser = clap::value_parser!(u32).range(64..=4096))]
+    size: u32,
+
+    /// Use Lightroom's cached preview: quick, but can be stale after recent edits
+    #[arg(long)]
+    fast: bool,
+
+    /// Include 256-bin histograms (luma, r, g, b) in the stats
+    #[arg(long)]
+    histogram: bool,
+
+    /// Skip decoding the previews and computing stats
+    #[arg(long)]
+    no_stats: bool,
+}
+
+#[derive(Args)]
 struct TargetArgs {
     /// Photo id (repeatable)
     #[arg(long = "photo", value_name = "ID")]
@@ -396,9 +467,9 @@ async fn run(cli: Cli, json: bool) -> u8 {
             return e.exit_code();
         }
     };
-    let ctx = Context {
+    let mut ctx = Context {
         paths: paths.clone(),
-        timeout: Duration::from_secs_f64(cli.timeout),
+        timeout: Duration::from_secs_f64(cli.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS)),
         connect_timeout: Duration::from_secs_f64(cli.connect_timeout),
     };
     match cli.command {
@@ -432,6 +503,26 @@ async fn run(cli: Cli, json: bool) -> u8 {
                 Err(e) => Err(e),
             };
             output::emit(result, json, output::info)
+        }
+        Command::Preview(args) => {
+            let result = match args.target.ids() {
+                Ok(ids) => {
+                    ctx.timeout = cli.timeout.map_or_else(
+                        || preview::default_timeout(ids.as_deref()),
+                        Duration::from_secs_f64,
+                    );
+                    let options = PreviewOptions {
+                        ids,
+                        size: args.size,
+                        fast: args.fast,
+                        histogram: args.histogram,
+                        stats: !args.no_stats,
+                    };
+                    preview::run(&ctx, &options).await
+                }
+                Err(e) => Err(e),
+            };
+            output::emit(result, json, output::preview)
         }
         Command::Raw { cmd, args } => output::emit(
             commands::raw::run(&ctx, &cmd, args.as_deref()).await,

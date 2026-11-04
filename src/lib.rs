@@ -7,3 +7,4 @@ pub mod paths;
 pub mod platform;
 pub mod plugin_link;
 pub mod protocol;
+pub mod stats;

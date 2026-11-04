@@ -1,4 +1,5 @@
 local CatalogHandlers = require 'CatalogHandlers'
+local PreviewHandler = require 'PreviewHandler'
 
 local Handlers = {}
 
@@ -18,8 +19,10 @@ function Handlers.new(deps)
     return {}
   end
 
-  for name, handler in pairs(CatalogHandlers.new()) do
-    handlers[name] = handler
+  for _, module in ipairs({ CatalogHandlers, PreviewHandler }) do
+    for name, handler in pairs(module.new()) do
+      handlers[name] = handler
+    end
   end
 
   return handlers

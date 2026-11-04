@@ -17,13 +17,17 @@ Lightroom.
 - `Photos.lua` (pure): builds summary/info objects from already-fetched metadata.
 - `Targets.lua` (pure, catalog injected): resolves explicit ids or the selection.
 - `CatalogHandlers.lua`: the catalog commands (`search`, `select`, `selection`,
-  `info`); the only file that calls the catalog SDK. Merged in by `Handlers.lua`.
+  `info`). Merged in by `Handlers.lua`.
+- `Preview.lua` (pure): `preview` arg validation, export settings table, result
+  assembly.
+- `PreviewHandler.lua`: the `preview` command (export session or cached
+  thumbnails); merged in by `Handlers.lua`.
 - `plugin/tests/run.lua`: luajit tests, run from the repo root.
 - `src/lib.rs` and its modules are the reusable library (a future MCP server
   should depend on it): `client.rs` (CLI to broker), `broker.rs`,
   `plugin_link.rs` (broker to plugin, id multiplexing), `protocol.rs`,
   `paths.rs`, `error.rs`, `log.rs`, `commands/`, `platform/` (OS-specific
-  paths).
+  paths), `stats.rs` (JPEG luminance and clipping stats; no printing).
 - `src/main.rs` (clap, exit mapping) and `src/output.rs` (human/JSON printing)
   are the only places that print or exit.
 - `tests/`: integration tests spawn the built binary. `tests/common/mod.rs`
@@ -36,7 +40,9 @@ Check every SDK call, metadata key and search criterion against the SDK docs
 before using it; don't rely on memory or other projects. The SDK (Adobe's
 Lightroom Classic SDK download) lives untracked in `local/sdk/`: API reference
 in `API Reference/modules/*.html` (e.g. `LrCatalog.html` for `findPhotos`
-criteria), guide in `Manual/`, examples in `Sample Plugins/`. If it's missing,
+criteria), guide in `Manual/` (searchable text in `guide.txt`, extracted with
+`swift pdftext.swift <pdf>`; export setting keys are in chapter 3), examples in
+`Sample Plugins/`. If it's missing,
 ask the user for it. Anything the docs don't cover (e.g. `getPhotoByLocalId`)
 counts as unsupported unless verified live.
 
@@ -67,6 +73,10 @@ counts as unsupported unless verified live.
 - No `LrShutdownApp`/`LrShutdownPlugin` hooks: they made quitting hang on
   "performing shutdown tasks". Lightroom cancels the server's function context
   on quit, and the broker exits when its connection closes.
+- `LR_jpeg_quality` is 0..1, not 0..100. `LR_size_resizeType = 'longEdge'` is
+  constrained by `LR_size_maxHeight`, so set both max values.
+- Server commands run in their own task so the loop keeps ticking; only `ping`
+  is answered while one runs (`Dispatch.nextIndex`).
 - LrLogger's log location varies by version, so the plugin logs to
   `~/.lrcli/plugin.log`; the last lines also show in Plug-in Manager.
 

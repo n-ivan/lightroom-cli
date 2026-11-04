@@ -89,6 +89,26 @@ function Dispatch:run(id, cmd, args)
   return reply
 end
 
+function Dispatch.isPing(line)
+  local request = json.decode(line)
+  return type(request) == 'table' and getmetatable(request) == nil and request.cmd == 'ping'
+end
+
+-- Commands run one at a time because handlers use the catalog and exports, but
+-- a ping must be answered even while one is running so the broker's liveness
+-- check doesn't fail during long commands.
+function Dispatch.nextIndex(queue, busy)
+  if not busy then
+    return #queue > 0 and 1 or nil
+  end
+  for i, line in ipairs(queue) do
+    if Dispatch.isPing(line) then
+      return i
+    end
+  end
+  return nil
+end
+
 function Dispatch:handle(line)
   local request, err = json.decode(line)
   if request == nil or type(request) ~= 'table' or getmetatable(request) ~= nil then

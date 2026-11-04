@@ -73,12 +73,15 @@ lrcli search --rating '>=4' --flag picked --since 2024-01-01   # table of matchi
 lrcli search --keyword portrait --ids | lrcli select --photos - # ids in, selection out
 lrcli selection                                                # what is selected in Lightroom
 lrcli info --photo 42 --develop                                # metadata, EXIF, develop settings
+lrcli preview --photo 42 --size 1200                           # JPEG preview with current edits, plus stats
 ```
 
 Photos are identified by the catalog's local id (the `ID` column of `search`).
 `info` and `select` take repeated `--photo <id>`, or `--photos -` to read ids
 from stdin (one per line, or the JSON from `search --json`). `info` without ids
-acts on the current selection. Run `lrcli <command> --help` for all options.
+acts on the current selection. `preview` writes JPEGs under
+`~/.lrcli/previews/` and prints their paths with luminance and clipping stats;
+`--fast` uses Lightroom's cached preview, which can be stale after edits. Run `lrcli <command> --help` for all options.
 
 ### Exit codes
 

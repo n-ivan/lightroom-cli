@@ -7,6 +7,7 @@ local Version = require 'Version'
 local Photos = require 'Photos'
 local SearchCriteria = require 'SearchCriteria'
 local Targets = require 'Targets'
+local Preview = require 'Preview'
 
 local passed, failed = 0, 0
 
@@ -493,6 +494,104 @@ test('targets: sameIds compares as sets', function()
   eq(Targets.sameIds({ { localIdentifier = 1 }, { localIdentifier = 2 } }, { 2, 1 }), true)
   eq(Targets.sameIds({ { localIdentifier = 1 } }, { 1, 2 }), false)
   eq(Targets.sameIds({ { localIdentifier = 3 } }, { 1 }), false)
+end)
+
+test('dispatch.isPing recognises only ping requests', function()
+  eq(Dispatch.isPing('{"id":1,"cmd":"ping"}'), true)
+  eq(Dispatch.isPing('{"id":1,"cmd":"preview"}'), false)
+  eq(Dispatch.isPing('garbage'), false)
+  eq(Dispatch.isPing('[1]'), false)
+end)
+
+test('dispatch.nextIndex runs one command at a time but lets pings through', function()
+  local ping = '{"id":2,"cmd":"ping"}'
+  local other = '{"id":1,"cmd":"preview"}'
+  eq(Dispatch.nextIndex({}, false), nil)
+  eq(Dispatch.nextIndex({ other, ping }, false), 1)
+  eq(Dispatch.nextIndex({}, true), nil)
+  eq(Dispatch.nextIndex({ other }, true), nil)
+  eq(Dispatch.nextIndex({ other, ping }, true), 2)
+end)
+
+local function previewErr(args)
+  local ok, err = pcall(Preview.parseArgs, args, function(dir)
+    return dir == '/tmp/ok'
+  end)
+  eq(ok, false)
+  eq(err.code, 'bad_request')
+  return err
+end
+
+test('preview: parseArgs applies defaults and validates', function()
+  local parsed = Preview.parseArgs({ dir = '/tmp/ok' }, function()
+    return true
+  end)
+  eq(parsed.size, 1600)
+  eq(parsed.mode, 'export')
+  eq(parsed.dir, '/tmp/ok')
+  eq(Preview.parseArgs({ dir = '/tmp/ok', size = 64, mode = 'thumbnail' }, function()
+    return true
+  end).mode, 'thumbnail')
+  previewErr({})
+  previewErr({ dir = 'relative' })
+  previewErr({ dir = '/tmp/missing' })
+  previewErr({ dir = '/tmp/ok', size = 63 })
+  previewErr({ dir = '/tmp/ok', size = 4097 })
+  previewErr({ dir = '/tmp/ok', size = 100.5 })
+  previewErr({ dir = '/tmp/ok', mode = 'raw' })
+end)
+
+test('preview: photo count is capped', function()
+  Preview.checkCount(50)
+  eq(pcall(Preview.checkCount, 51), false)
+end)
+
+test('preview: export settings constrain the long edge and keep exports local', function()
+  local s = Preview.exportSettings('/tmp/d', 800)
+  eq(s.LR_export_destinationPathPrefix, '/tmp/d')
+  eq(s.LR_size_maxHeight, 800)
+  eq(s.LR_size_maxWidth, 800)
+  eq(s.LR_size_resizeType, 'longEdge')
+  eq(s.LR_jpeg_quality, 0.8)
+  eq(s.LR_reimportExportedPhoto, false)
+  eq(s.LR_collisionHandling, 'overwrite')
+  eq(s.LR_tokens, 'lrcli-{{image_name}}-{{naming_operationSequence_3Digits}}')
+end)
+
+test('preview: thumbnailPath handles trailing slashes', function()
+  eq(Preview.thumbnailPath('/a/b', 7), '/a/b/lrcli-7-thumb.jpg')
+  eq(Preview.thumbnailPath('/a/b/', 7), '/a/b/lrcli-7-thumb.jpg')
+end)
+
+test('preview: exportEntries keeps photo order and reports skips and misses', function()
+  local infos = {
+    { id = 1, filename = 'a.cr3' },
+    { id = 2, filename = 'v.mov', skipReason = 'Videos cannot be previewed.' },
+    { id = 3, filename = 'c.cr3' },
+    { id = 4 },
+  }
+  local entries = Preview.exportEntries(infos, {
+    [1] = { path = '/d/lrcli-a.jpg' },
+    [3] = { message = 'render failed' },
+  })
+  eq(#entries, 4)
+  eq(entries[1].file, '/d/lrcli-a.jpg')
+  eq(entries[1].error, json.null)
+  eq(entries[2].file, json.null)
+  eq(entries[2].error, 'Videos cannot be previewed.')
+  eq(entries[3].error, 'render failed')
+  eq(entries[4].filename, json.null)
+  assert(entries[4].error ~= json.null)
+  eq(entries[1].possiblyStale, nil)
+  json.encode(entries)
+end)
+
+test('preview: thumbnail entries are marked possibly stale', function()
+  local entry = Preview.entry('thumbnail', { id = 1, filename = 'a' }, '/d/x.jpg', nil)
+  eq(entry.possiblyStale, true)
+  local reply = Preview.reply('ids', { mode = 'thumbnail', size = 800 }, { entry })
+  eq(reply.target, 'ids')
+  eq(reply.size, 800)
 end)
 
 test('dispatch replies encode to JSON', function()

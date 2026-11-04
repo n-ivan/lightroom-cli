@@ -6,6 +6,7 @@ use crate::paths::Paths;
 
 pub mod photos;
 pub mod plugin;
+pub mod preview;
 pub mod raw;
 pub mod status;
 
