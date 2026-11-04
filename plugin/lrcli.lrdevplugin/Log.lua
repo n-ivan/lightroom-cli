@@ -21,11 +21,22 @@ local function logPath()
   return LrPathUtils.child(dir, 'plugin.log')
 end
 
+local MAX_FILE_BYTES = 1024 * 1024
 local fileFailureReported = false
+local checkedSize = false
 
 local function appendToFile(line)
   local ok, err = pcall(function()
-    local file = assert(io.open(logPath(), 'a'))
+    local path = logPath()
+    local mode = 'a'
+    if not checkedSize then
+      checkedSize = true
+      local size = LrFileUtils.fileAttributes(path).fileSize
+      if size and size > MAX_FILE_BYTES then
+        mode = 'w'
+      end
+    end
+    local file = assert(io.open(path, mode))
     file:write(line, '\n')
     file:close()
   end)

@@ -4,6 +4,7 @@ use crate::client::Client;
 use crate::error::Error;
 use crate::paths::Paths;
 
+pub mod edit;
 pub mod lifecycle;
 pub mod photos;
 pub mod plugin;

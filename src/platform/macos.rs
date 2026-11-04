@@ -74,5 +74,17 @@ pub fn blip_app(return_to: Option<&str>) -> Result<(), Error> {
 }
 
 pub fn quit_app() -> Result<(), Error> {
-    osascript(&format!("tell application id \"{BUNDLE_ID}\" to quit")).map(drop)
+    osascript(&format!("tell application id \"{BUNDLE_ID}\" to quit"))
+        .map(drop)
+        .map_err(|e| {
+            // -128 is how an app declines a quit request, e.g. while a modal window is open.
+            if e.message.contains("(-128)") {
+                Error::failed(
+                    "quit_refused",
+                    "Lightroom Classic refused to quit. Close any open dialog or window in Lightroom (for example Plug-in Manager) and retry.",
+                )
+            } else {
+                e
+            }
+        })
 }

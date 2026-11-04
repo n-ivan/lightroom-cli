@@ -8,11 +8,14 @@ use clap::error::ErrorKind;
 use clap::{Args, Parser, Subcommand};
 
 use lrcli::broker;
+use lrcli::commands::edit::{self, Run};
 use lrcli::commands::photos::{self, Rating, SearchOptions};
 use lrcli::commands::preview::{self, PreviewOptions};
 use lrcli::commands::{self, Context};
 use lrcli::error::Error;
+use lrcli::history::command_line;
 use lrcli::paths::Paths;
+use lrcli::settings::{Setting, parse_setting};
 
 const DEFAULT_TIMEOUT_SECS: f64 = 30.0;
 const STOP_WAIT_SECS: f64 = 60.0;
@@ -28,6 +31,8 @@ Examples:
                                Find photos in the catalog
   lrcli info --photo 123       Show a photo's metadata
   lrcli preview --photo 123    Render a JPEG preview of a photo with its edits
+  lrcli apply --photo 123 Exposure2012+=0.5
+                               Edit develop settings (`lrcli undo` reverts it)
 
 How it works:
   The lrcli plugin runs inside Lightroom Classic and starts one long-lived
@@ -115,7 +120,7 @@ JSON output:
   Lightroom, false if the plugin was already answering.
 
 Exit 3 means the plugin didn't answer in time: check Lightroom for a dialog
-(catalog upgrade, update prompt, \"What's New\") or open Library > Plug-in
+(catalog upgrade, update prompt, \"What's New\") or open File > Plug-in
 Extras > lrcli Status..., and run `lrcli plugin install` if the plugin isn't
 installed.")]
     Start {
@@ -309,6 +314,177 @@ JSON output:
   is added under \"stats\" with --histogram.")]
     Preview(Box<PreviewArgs>),
 
+    /// Change develop settings (sliders) on photos
+    #[command(after_help = "\
+Sets or adjusts develop settings on photos. Without --photo or --photos, acts
+on Lightroom's current selection. Each SETTING is one of:
+  Key=Value    set an absolute value (number, true/false, or text)
+  Key+=N       add N to the current value
+  Key-=N       subtract N from the current value
+Keys are Lightroom's develop setting names, for example Exposure2012,
+Contrast2012, Highlights2012, Shadows2012, Whites2012, Blacks2012, Texture,
+Clarity2012, Dehaze, Vibrance, Saturation, Temperature, Tint, WhiteBalance.
+Run `lrcli info --develop` to see the names and current values. Unknown names
+are refused with close matches. Relative changes are computed by lrcli from the
+current value; Lightroom may clamp the result, and the output flags any value
+that differs from what was requested.
+
+All photos are written in one step that shows as \"lrcli apply\" in Lightroom's
+Edit > Undo menu. Videos are reported per photo and skipped. If every photo
+fails the command exits 1. --preview then renders a preview of the edited
+photos (like `lrcli preview`). Every successful edit is recorded for `lrcli undo`.
+
+Examples:
+  lrcli apply --photo 149 Exposure2012+=0.5 Contrast2012=15 WhiteBalance=Auto
+  lrcli apply Highlights2012-=20 Shadows2012+=30 --preview
+  lrcli search --rating 5 --ids | lrcli apply --photos - Vibrance=25
+
+JSON output:
+  {\"ok\":true,\"target\":\"ids\",\"photos\":[{\"id\":149,\"filename\":\"IMG_0001.CR3\",
+    \"before\":{\"Exposure2012\":0.0},\"after\":{\"Exposure2012\":0.5},
+    \"requested\":{\"Exposure2012\":0.5}}]}
+  A photo that failed has \"error\" instead. With --preview the preview reply is
+  under \"preview\" (or \"previewError\").")]
+    Apply(Box<ApplyArgs>),
+
+    /// List the develop presets available in Lightroom
+    #[command(after_help = "\
+Prints each preset folder and the presets in it. Use a preset's name or uuid
+with `lrcli preset`.
+
+Examples:
+  lrcli presets
+  lrcli --json presets
+
+JSON output:
+  {\"ok\":true,\"folders\":[{\"name\":\"Color\",\"presets\":[{\"name\":\"Vivid\",\"uuid\":\"...\"}]}]}")]
+    Presets,
+
+    /// Apply a develop preset to photos
+    #[command(after_help = "\
+NAME_OR_UUID is a preset name (matched exactly, ignoring case) or its uuid
+(see `lrcli presets --json`). A name shared by several presets is refused with
+the choices listed as Folder/Name (uuid). --amount is the preset strength, 0 to
+200 (100 is the preset as designed). Without --photo or --photos, acts on
+Lightroom's current selection. The output lists, per photo, the settings the
+preset changed. Shows as \"lrcli preset <name>\" in Lightroom's Edit > Undo menu,
+and is recorded for `lrcli undo`.
+
+Examples:
+  lrcli preset Vivid --photo 149
+  lrcli preset \"Warm Contrast\" --amount 60 --preview
+  lrcli preset 1C2D3E4F-0123-4567-89AB-CDEF01234567 --photos -
+
+JSON output:
+  {\"ok\":true,\"target\":\"ids\",\"preset\":{\"name\":\"Vivid\",\"uuid\":\"...\",\"folder\":\"Color\"},
+   \"photos\":[{\"id\":149,\"filename\":\"IMG_0001.CR3\",
+     \"before\":{\"Vibrance\":0},\"after\":{\"Vibrance\":30}}]}")]
+    Preset(Box<PresetArgs>),
+
+    /// Add or remove keywords on photos
+    #[command(subcommand)]
+    Tag(TagCommand),
+
+    /// Set the star rating of photos
+    #[command(after_help = "\
+RATING is 0 (no stars) to 5. Without --photo or --photos, acts on Lightroom's
+current selection. Recorded for `lrcli undo`.
+
+Examples:
+  lrcli rate 4 --photo 149
+  lrcli rate 0
+
+JSON output:
+  {\"ok\":true,\"target\":\"ids\",\"photos\":[{\"id\":149,\"filename\":\"IMG_0001.CR3\",\"before\":2,\"after\":4}]}")]
+    Rate(Box<RateArgs>),
+
+    /// Pick, reject or unflag photos
+    #[command(after_help = "\
+Without --photo or --photos, acts on Lightroom's current selection. Recorded
+for `lrcli undo`.
+
+Examples:
+  lrcli flag picked --photo 149
+  lrcli flag none
+  lrcli search --rating 1 --ids | lrcli flag rejected --photos -
+
+JSON output:
+  {\"ok\":true,\"target\":\"ids\",\"photos\":[{\"id\":149,\"filename\":\"IMG_0001.CR3\",
+    \"before\":\"none\",\"after\":\"picked\"}]}")]
+    Flag(Box<FlagArgs>),
+
+    /// Set the color label of photos
+    #[command(after_help = "\
+Lightroom's color labels are red, yellow, green, blue and purple; `none`
+removes the label. Without --photo or --photos, acts on Lightroom's current
+selection. Recorded for `lrcli undo`.
+
+Examples:
+  lrcli label red --photo 149
+  lrcli label none
+
+JSON output:
+  {\"ok\":true,\"target\":\"ids\",\"photos\":[{\"id\":149,\"filename\":\"IMG_0001.CR3\",
+    \"before\":\"none\",\"after\":\"red\"}]}")]
+    Label(Box<LabelArgs>),
+
+    /// Undo the last recorded lrcli edits
+    #[command(after_help = "\
+Every successful apply, preset, tag, rate, flag and label is recorded in
+$LRCLI_HOME/history.jsonl together with the values it replaced and the values it
+produced. `undo` reverts the most recent --steps entries (default 1) that were
+made in the catalog Lightroom has open, newest first, then removes them from the
+history. Entries for other catalogs are skipped.
+
+Lightroom's own undo is used when it can be verified safe: afterwards the photos
+must hold exactly the recorded before-values and the previous lrcli edit must be
+intact, otherwise the undo is reverted. In that case the recorded values are
+restored instead; develop settings that had no value before cannot be cleared
+that way and are reported as warnings. Editing in Lightroom between an lrcli
+write and `lrcli undo` forces this fallback. If a photo or keyword no longer
+exists, everything else is still restored and the problem is reported per photo.
+Undo steps are not themselves recorded.
+
+--dry-run prints what would be restored without changing anything.
+
+Examples:
+  lrcli undo
+  lrcli undo --steps 3 --dry-run
+
+JSON output:
+  {\"ok\":true,\"dryRun\":false,\"undone\":[{\"time\":\"...\",\"command\":\"lrcli rate 4\",
+    \"changes\":[...],\"method\":\"restore\",\"nativeSkipped\":\"...\",\"photos\":[{\"id\":149,\"filename\":\"IMG_0001.CR3\",\"restored\":[\"rating\"],
+    \"warnings\":[]}]}]}
+  method is \"native\" (Lightroom's undo; no photos list) or \"restore\".
+  With --dry-run: {\"ok\":true,\"dryRun\":true,\"undo\":[{\"time\",\"command\",\"changes\"}]}")]
+    Undo {
+        /// Number of recorded edits to undo, newest first
+        #[arg(long, value_name = "N", default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
+        steps: u32,
+
+        /// Show what would be restored without changing anything
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// List recorded edits (what `lrcli undo` would revert)
+    #[command(after_help = "\
+Shows the most recent entries of $LRCLI_HOME/history.jsonl, newest first, for
+every catalog. This does not need Lightroom to be running.
+
+Examples:
+  lrcli history
+  lrcli --json history --limit 5
+
+JSON output:
+  {\"ok\":true,\"entries\":[{\"time\":\"2024-05-31T10:00:00Z\",\"command\":\"lrcli rate 4\",
+    \"catalog\":\"/path/main.lrcat\",\"changes\":[{\"id\":149,\"rating\":2}]}]}")]
+    History {
+        /// Maximum entries to show
+        #[arg(long, value_name = "N", default_value_t = 20)]
+        limit: usize,
+    },
+
     /// Install, remove, or locate the Lightroom Classic plugin
     #[command(
         subcommand,
@@ -382,6 +558,117 @@ Examples:
 JSON output:
   {\"ok\":true,\"source\":\"...\",\"target\":\"...\",\"config\":\"...\"}")]
     Path,
+}
+
+#[derive(Subcommand)]
+enum TagCommand {
+    /// Add keywords to photos
+    #[command(after_help = "\
+A KEYWORD is a name or a path like \"Parent > Child\" (quote it). A bare name
+matches a keyword anywhere in the keyword tree; if several keywords share the
+name the command fails and lists their paths. Missing keywords, including
+missing parents in a path, are created. Without --photo or --photos, acts on
+Lightroom's current selection. Recorded for `lrcli undo`.
+
+Examples:
+  lrcli tag add portrait --photo 149
+  lrcli tag add \"Places > France > Paris\" studio --photos -
+
+JSON output:
+  {\"ok\":true,\"target\":\"ids\",\"photos\":[{\"id\":149,\"filename\":\"IMG_0001.CR3\",
+    \"added\":[\"portrait\"],\"removed\":[]}]}
+  Only keywords that actually changed are listed.")]
+    Add {
+        /// Keyword name or "Parent > Child" path
+        #[arg(required = true, value_name = "KEYWORD")]
+        keywords: Vec<String>,
+
+        #[command(flatten)]
+        target: TargetArgs,
+    },
+
+    /// Remove keywords from photos
+    #[command(after_help = "\
+Keywords are given as for `tag add`. A keyword that does not exist in the
+catalog is an error; a photo that doesn't have it is left alone. The keyword
+itself stays in the catalog. Recorded for `lrcli undo`.
+
+Examples:
+  lrcli tag remove portrait --photo 149
+  lrcli tag remove \"Places > France\"
+
+JSON output:
+  Same as `tag add`.")]
+    Remove {
+        /// Keyword name or "Parent > Child" path
+        #[arg(required = true, value_name = "KEYWORD")]
+        keywords: Vec<String>,
+
+        #[command(flatten)]
+        target: TargetArgs,
+    },
+}
+
+#[derive(Args)]
+struct ApplyArgs {
+    #[command(flatten)]
+    target: TargetArgs,
+
+    /// Key=Value, Key+=N or Key-=N (see --help)
+    #[arg(required = true, value_name = "SETTING", value_parser = parse_setting)]
+    settings: Vec<Setting>,
+
+    /// After writing, render a preview of the edited photos
+    #[arg(long)]
+    preview: bool,
+}
+
+#[derive(Args)]
+struct PresetArgs {
+    /// Preset name or uuid
+    #[arg(value_name = "NAME_OR_UUID")]
+    preset: String,
+
+    #[command(flatten)]
+    target: TargetArgs,
+
+    /// Preset strength, 0 to 200
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(0..=200))]
+    amount: Option<u32>,
+
+    /// After writing, render a preview of the edited photos
+    #[arg(long)]
+    preview: bool,
+}
+
+#[derive(Args)]
+struct RateArgs {
+    /// Stars, 0 to 5
+    #[arg(value_name = "RATING", value_parser = clap::value_parser!(u8).range(0..=5))]
+    rating: u8,
+
+    #[command(flatten)]
+    target: TargetArgs,
+}
+
+#[derive(Args)]
+struct FlagArgs {
+    /// Flag to set
+    #[arg(value_parser = ["picked", "rejected", "none"])]
+    flag: String,
+
+    #[command(flatten)]
+    target: TargetArgs,
+}
+
+#[derive(Args)]
+struct LabelArgs {
+    /// Color label to set
+    #[arg(value_parser = ["red", "yellow", "green", "blue", "purple", "none"])]
+    label: String,
+
+    #[command(flatten)]
+    target: TargetArgs,
 }
 
 #[derive(Args)]
@@ -528,6 +815,14 @@ fn parse_secs(text: &str) -> Result<f64, String> {
         .ok_or_else(|| "must be a positive number of seconds".to_string())
 }
 
+fn write_run(command_line: &str, preview: bool, timeout: Option<f64>) -> Run<'_> {
+    Run {
+        command_line,
+        preview,
+        timeout: timeout.map(Duration::from_secs_f64),
+    }
+}
+
 fn json_requested() -> bool {
     std::env::args().skip(1).any(|a| a == "--json")
         || std::env::var("LRCLI_OUTPUT").is_ok_and(|v| v == "json")
@@ -568,6 +863,7 @@ async fn run(cli: Cli, json: bool) -> u8 {
         timeout: Duration::from_secs_f64(cli.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS)),
         connect_timeout: Duration::from_secs_f64(cli.connect_timeout),
     };
+    let command_line = command_line(std::env::args().skip(1));
     match cli.command {
         Command::Status => output::emit(commands::status::run(&ctx).await, json, output::status),
         Command::Start { launch } => output::emit(
@@ -647,6 +943,69 @@ async fn run(cli: Cli, json: bool) -> u8 {
                 Err(e) => Err(e),
             };
             output::emit(result, json, output::preview)
+        }
+        Command::Apply(args) => {
+            let run = write_run(&command_line, args.preview, cli.timeout);
+            let result = match args.target.ids() {
+                Ok(ids) => edit::apply(&ctx, &run, ids.as_deref(), &args.settings).await,
+                Err(e) => Err(e),
+            };
+            output::emit(result, json, output::apply)
+        }
+        Command::Presets => output::emit(edit::presets(&ctx).await, json, output::presets),
+        Command::Preset(args) => {
+            let run = write_run(&command_line, args.preview, cli.timeout);
+            let result = match args.target.ids() {
+                Ok(ids) => {
+                    edit::preset(&ctx, &run, ids.as_deref(), &args.preset, args.amount).await
+                }
+                Err(e) => Err(e),
+            };
+            output::emit(result, json, output::preset)
+        }
+        Command::Tag(tag) => {
+            let run = write_run(&command_line, false, cli.timeout);
+            let (target, add, remove) = match tag {
+                TagCommand::Add { keywords, target } => (target, keywords, Vec::new()),
+                TagCommand::Remove { keywords, target } => (target, Vec::new(), keywords),
+            };
+            let result = match target.ids() {
+                Ok(ids) => edit::tag(&ctx, &run, ids.as_deref(), &add, &remove).await,
+                Err(e) => Err(e),
+            };
+            output::emit(result, json, output::tag)
+        }
+        Command::Rate(args) => {
+            let run = write_run(&command_line, false, cli.timeout);
+            let result = match args.target.ids() {
+                Ok(ids) => edit::rate(&ctx, &run, ids.as_deref(), args.rating).await,
+                Err(e) => Err(e),
+            };
+            output::emit(result, json, output::scalar)
+        }
+        Command::Flag(args) => {
+            let run = write_run(&command_line, false, cli.timeout);
+            let result = match args.target.ids() {
+                Ok(ids) => edit::flag(&ctx, &run, ids.as_deref(), &args.flag).await,
+                Err(e) => Err(e),
+            };
+            output::emit(result, json, output::scalar)
+        }
+        Command::Label(args) => {
+            let run = write_run(&command_line, false, cli.timeout);
+            let result = match args.target.ids() {
+                Ok(ids) => edit::label(&ctx, &run, ids.as_deref(), &args.label).await,
+                Err(e) => Err(e),
+            };
+            output::emit(result, json, output::scalar)
+        }
+        Command::Undo { steps, dry_run } => output::emit(
+            edit::undo(&ctx, steps as usize, dry_run).await,
+            json,
+            output::undo,
+        ),
+        Command::History { limit } => {
+            output::emit(edit::history(&ctx, limit), json, output::history)
         }
         Command::Raw { cmd, args } => output::emit(
             commands::raw::run(&ctx, &cmd, args.as_deref()).await,

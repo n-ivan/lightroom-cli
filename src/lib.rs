@@ -1,10 +1,13 @@
 pub mod broker;
 pub mod client;
+pub mod clock;
 pub mod commands;
 pub mod error;
+pub mod history;
 pub mod log;
 pub mod paths;
 pub mod platform;
 pub mod plugin_link;
 pub mod protocol;
+pub mod settings;
 pub mod stats;

@@ -3,9 +3,9 @@
 Control Adobe Lightroom Classic from the command line, so scripts and AI agents
 can browse a catalog, apply edits, and look at rendered previews of the results.
 
-> **Status:** early development. `lrcli status`, `lrcli plugin install` and the
-> read-only catalog commands (`search`, `select`, `selection`, `info`) exist;
-> editing commands are coming.
+> **Status:** early development. Status, plugin install, catalog queries,
+> previews and the first editing commands (`apply`, `preset`, `tag`, `rate`,
+> `flag`, `label`, `undo`) exist.
 
 ## How it works
 
@@ -50,7 +50,7 @@ The plugin forces Lightroom to initialise it at startup (`LrForceInitPlugin`
 plus a menu item), so no manual Plug-in Manager step is needed. `lrcli start`
 launches Lightroom in the background; it briefly comes to the front once
 (the plugin can't start otherwise) and focus returns to your app. If something
-goes wrong, open **Library > Plug-in Extras > lrcli Status…** to see the
+goes wrong, open **File > Plug-in Extras > lrcli Status…** to see the
 plugin's recent log.
 
 `plugin install` symlinks `plugin/lrcli.lrdevplugin` into Lightroom's Modules
@@ -71,7 +71,8 @@ With `--json`, the reply is printed on stdout without its `id`, and errors are
 stderr.
 
 State lives in `~/.lrcli` (override with `LRCLI_HOME`): `ports.json` (written by
-the plugin), `plugin.log`, `broker.sock`, `broker.log`, `config.json`.
+the plugin), `plugin.log`, `broker.sock`, `broker.log`, `config.json`,
+`history.jsonl` (undo history).
 
 ## Commands
 
@@ -84,6 +85,13 @@ lrcli search --keyword portrait --ids | lrcli select --photos - # ids in, select
 lrcli selection                                                # what is selected in Lightroom
 lrcli info --photo 42 --develop                                # metadata, EXIF, develop settings
 lrcli preview --photo 42 --size 1200                           # JPEG preview with current edits, plus stats
+lrcli apply --photo 42 Exposure2012+=0.5 Contrast2012=15 --preview  # edit develop settings, then render a preview
+lrcli presets                                                  # develop presets by folder
+lrcli preset "Warm Contrast" --amount 60 --photo 42            # apply a develop preset
+lrcli tag add "Places > Paris" portrait --photo 42             # add keywords (tag remove to remove)
+lrcli rate 4 --photo 42                                        # stars; also flag picked|rejected|none, label red|...|none
+lrcli undo                                                     # revert the last recorded edit (--steps N, --dry-run)
+lrcli history                                                  # what undo would revert
 ```
 
 `start`, `stop` and `restart` control the Lightroom Classic app (macOS only).
@@ -98,6 +106,12 @@ from stdin (one per line, or the JSON from `search --json`). `info` without ids
 acts on the current selection. `preview` writes JPEGs under
 `~/.lrcli/previews/` and prints their paths with luminance and clipping stats;
 `--fast` uses Lightroom's cached preview, which can be stale after edits. Run `lrcli <command> --help` for all options.
+
+Editing commands (`apply`, `preset`, `tag`, `rate`, `flag`, `label`) take the same
+`--photo`/`--photos -` targets and default to the current selection. Each writes
+all its photos in one step, which shows up in Lightroom's Edit > Undo menu, and
+records the replaced values in `~/.lrcli/history.jsonl` so `lrcli undo` can
+restore them (for the catalog that is open).
 
 ### Exit codes
 

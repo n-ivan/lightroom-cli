@@ -132,7 +132,7 @@ pub async fn start(
             Kind::Unreachable,
             "start_timeout",
             format!(
-                "Lightroom Classic is running but the lrcli plugin didn't answer within {} s. Check Lightroom for a dialog (catalog upgrade, update prompt, \"What's New\") or open Library > Plug-in Extras > lrcli Status…. If the plugin isn't installed, run `lrcli plugin install`, then `lrcli restart`.",
+                "Lightroom Classic is running but the lrcli plugin didn't answer within {} s. Check Lightroom for a dialog (catalog upgrade, update prompt, \"What's New\") or open File > Plug-in Extras > lrcli Status…. If the plugin isn't installed, run `lrcli plugin install`, then `lrcli restart`.",
                 wait.as_secs()
             ),
         )),

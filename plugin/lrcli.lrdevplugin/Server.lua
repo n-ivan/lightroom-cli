@@ -237,8 +237,16 @@ local function newServer(context)
     self.replyQueue[#self.replyQueue + 1] = encodeReply(reply)
   end
 
+  local function commandName(line)
+    local request = json.decode(line)
+    return type(request) == 'table' and tostring(request.cmd) or '?'
+  end
+
   local function dispatchLine(line, generation)
+    local name, started = commandName(line), now()
     local ok, reply = LrTasks.pcall(self.dispatch.handle, self.dispatch, line)
+    Log.info(string.format('%s finished in %.2f s%s', name, now() - started,
+      ok and type(reply) == 'table' and reply.ok == false and (' (' .. tostring(reply.error) .. ')') or ''))
     -- A rebind resets busy and the queues; a stale task must not touch them.
     if not self.running or generation ~= self.generation then
       return

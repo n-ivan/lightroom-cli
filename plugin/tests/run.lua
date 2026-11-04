@@ -8,6 +8,7 @@ local Photos = require 'Photos'
 local SearchCriteria = require 'SearchCriteria'
 local Targets = require 'Targets'
 local Preview = require 'Preview'
+local Writes = require 'Writes'
 
 local passed, failed = 0, 0
 
@@ -453,6 +454,26 @@ local function stubCatalog(opts)
   }
 end
 
+test('writes: rangeError points non-raw Temperature at IncrementalTemperature', function()
+  local Writes = require 'Writes'
+  local nonRaw = { Temperature = { -100, 100 }, IncrementalTemperature = { -100, 100 } }
+  local raw = { Temperature = { 2000, 50000 } }
+  assert(Writes.rangeError({ Temperature = 20 }, nonRaw):find('IncrementalTemperature', 1, true))
+  eq(Writes.rangeError({ Temperature = 5500 }, raw), nil)
+  assert(Writes.rangeError({ Temperature = 1000 }, raw):find('2000..50000', 1, true))
+end)
+
+test('writes: knownKeyTypes merges documented and live keys', function()
+  local Writes = require 'Writes'
+  local types = Writes.knownKeyTypes({ Exposure2012 = 'number' }, {
+    { Exposure2012 = 0.5, ColorGradeMidtoneHue = 40, Look = 'x', ToneCurvePV2012 = { 0, 0 } },
+  })
+  eq(types.Exposure2012, 'number')
+  eq(types.ColorGradeMidtoneHue, 'number')
+  eq(types.Look, 'string')
+  eq(types.ToneCurvePV2012, nil)
+end)
+
 test('targets: parseIds', function()
   eq(Targets.parseIds(nil), nil)
   eq(Targets.parseIds(json.null), nil)
@@ -599,6 +620,450 @@ test('dispatch replies encode to JSON', function()
   local line = json.encode(send(d, 'garbage'))
   assert(line:find('"id":null', 1, true), line)
   assert(line:find('"ok":false', 1, true), line)
+end)
+
+local keyTypes = { Exposure2012 = 'number', Contrast2012 = 'number', WhiteBalance = 'string', EnableDetail = 'boolean', ToneCurve = 'table' }
+
+test('writes: parseApply validates keys and types', function()
+  local parsed = Writes.parseApply({ set = { Contrast2012 = 15, WhiteBalance = 'Auto' }, add = { Exposure2012 = 0.5 } }, keyTypes)
+  eq(table.concat(parsed.touched, ','), 'Contrast2012,Exposure2012,WhiteBalance')
+  local err = badRequest(Writes.parseApply, { set = { exposure = 1 } }, keyTypes)
+  eq(err.code, 'bad_request')
+  assert(err.message:find('Exposure2012', 1, true), err.message)
+  badRequest(Writes.parseApply, { set = { Contrast2012 = 'x' } }, keyTypes)
+  badRequest(Writes.parseApply, { set = { EnableDetail = 1 } }, keyTypes)
+  badRequest(Writes.parseApply, { set = { ToneCurve = 1 } }, keyTypes)
+  badRequest(Writes.parseApply, { add = { WhiteBalance = 1 } }, keyTypes)
+  badRequest(Writes.parseApply, { set = { Exposure2012 = 1 }, add = { Exposure2012 = 1 } }, keyTypes)
+  badRequest(Writes.parseApply, {}, keyTypes)
+  badRequest(Writes.parseApply, { set = json.array({}) }, keyTypes)
+end)
+
+test('writes: suggestions match by prefix, case-insensitively', function()
+  eq(table.concat(Writes.suggest('contrast', keyTypes), ','), 'Contrast2012')
+  eq(#Writes.suggest('zzz', keyTypes), 0)
+end)
+
+test('writes: applyValues computes relative values and reports before', function()
+  local parsed = Writes.parseApply({ set = { Contrast2012 = 15 }, add = { Exposure2012 = 0.5 } }, keyTypes)
+  local values, before = Writes.applyValues({ Exposure2012 = 1, Contrast2012 = 3 }, parsed)
+  eq(values.Exposure2012, 1.5)
+  eq(values.Contrast2012, 15)
+  eq(before.Exposure2012, 1)
+  local _, _, err = Writes.applyValues({ Contrast2012 = 3 }, parsed)
+  assert(err and err:find('Exposure2012', 1, true), err)
+end)
+
+test('writes: changedSettings keeps only differing keys', function()
+  local before, after = Writes.changedSettings({ A = 1, B = 2, T = { 1, 2 } }, { A = 1, B = 3, T = { 1, 2 }, C = true })
+  eq(json.encode(before), '{"B":2,"C":null}')
+  eq(json.encode(after), '{"B":3,"C":true}')
+end)
+
+test('writes: gate maps aborted to write_busy and rethrows errors', function()
+  local function catalogReturning(status)
+    return {
+      withWriteAccessDo = function(_, _, fn)
+        fn()
+        return status
+      end,
+    }
+  end
+  Writes.gate(catalogReturning('executed'), 'n', function() end, pcall)
+  eq(badRequest(Writes.gate, catalogReturning('aborted'), 'n', function() end, pcall).code, 'write_busy')
+  local failing = {
+    withWriteAccessDo = function(_, _, fn)
+      fn()
+      return 'executed'
+    end,
+  }
+  eq(badRequest(Writes.gate, failing, 'n', function()
+    error({ code = 'boom', message = 'm' }, 0)
+  end, pcall).code, 'boom')
+end)
+
+test('writes: rating, flag and label parsing', function()
+  eq(Writes.parseRating({ rating = 3 }), 3)
+  eq(Writes.ratingValue(0), nil)
+  eq(Writes.ratingValue(4), 4)
+  badRequest(Writes.parseRating, { rating = 6 })
+  badRequest(Writes.parseRating, { rating = 1.5 })
+  local name, value = Writes.parseFlag({ flag = 'rejected' })
+  eq(name, 'rejected')
+  eq(value, -1)
+  badRequest(Writes.parseFlag, { flag = 'unflagged' })
+  eq(Writes.flagName(nil), 'none')
+  eq(Writes.parseLabel({ label = 'purple' }), 'purple')
+  badRequest(Writes.parseLabel, { label = 'pink' })
+  eq(Writes.labelName('Red'), 'red')
+  eq(Writes.labelName('white'), 'none')
+  eq(Writes.labelName(nil), 'none')
+end)
+
+local function keywordTree()
+  local nextId = 0
+  local function node(name, children)
+    nextId = nextId + 1
+    local kw = { localIdentifier = nextId, children = children or {} }
+    function kw:getName() return name end
+    function kw:getChildren() return self.children end
+    function kw:getParent() return self.parent end
+    for _, child in ipairs(kw.children) do
+      child.parent = kw
+    end
+    return kw
+  end
+  local portrait = node('Portrait', { node('Studio') })
+  local places = node('Places', { node('Studio'), node('Paris') })
+  return { portrait, places, node('Misc') }, portrait, places
+end
+
+test('writes: keyword paths are split and trimmed', function()
+  eq(table.concat(Writes.parseKeywordPath(' A > B '), '|'), 'A|B')
+  eq(table.concat(Writes.parseKeywordPath('Solo'), '|'), 'Solo')
+  badRequest(Writes.parseKeywordPath, 'A >')
+  badRequest(Writes.parseKeywordPath, '')
+end)
+
+test('writes: planKeyword finds, disambiguates and plans creation', function()
+  local roots, portrait, places = keywordTree()
+  local plan = Writes.planKeyword(roots, 'paris')
+  eq(plan.path, 'Places > Paris')
+  eq(plan.keyword, places.children[2])
+  local ambiguous = badRequest(Writes.planKeyword, roots, 'Studio')
+  assert(ambiguous.message:find('Portrait > Studio', 1, true) and ambiguous.message:find('Places > Studio', 1, true), ambiguous.message)
+  eq(Writes.planKeyword(roots, 'portrait > studio').keyword, portrait.children[1])
+  local fresh = Writes.planKeyword(roots, 'Portrait > Outdoor > Dusk')
+  eq(fresh.keyword, nil)
+  eq(fresh.parent, portrait)
+  eq(table.concat(fresh.rest, '|'), 'Outdoor|Dusk')
+  eq(fresh.path, 'Portrait > Outdoor > Dusk')
+  local top = Writes.planKeyword(roots, 'Brand New')
+  eq(top.parent, nil)
+  eq(top.path, 'Brand New')
+  eq(Writes.planKeyword(roots, 'Brand > New').path, 'Brand > New')
+end)
+
+test('writes: ensureKeyword creates the missing chain once', function()
+  local created = {}
+  local catalog = {
+    createKeyword = function(_, name, _, includeOnExport, parent, returnExisting)
+      created[#created + 1] = name
+      return { localIdentifier = #created + 100, name = name, parent = parent }
+    end,
+  }
+  local roots, portrait = keywordTree()
+  local plan = Writes.planKeyword(roots, 'Portrait > A > B')
+  local keyword = Writes.ensureKeyword(catalog, plan)
+  eq(Writes.ensureKeyword(catalog, plan), keyword)
+  eq(table.concat(created, ','), 'A,B')
+  eq(keyword.parent.parent, portrait)
+end)
+
+test('writes: tagWork skips what the photo already has', function()
+  local roots, _, places = keywordTree()
+  local paris = Writes.planKeyword(roots, 'Paris')
+  local misc = Writes.planKeyword(roots, 'Misc')
+  local fresh = Writes.planKeyword(roots, 'Fresh')
+  local have = Writes.keywordIdSet({ places.children[2] })
+  local adds, removes = Writes.tagWork({ paris, fresh }, { misc }, have)
+  eq(#adds, 1)
+  eq(adds[1], fresh)
+  eq(#removes, 0)
+  adds, removes = Writes.tagWork({}, { paris }, have)
+  eq(#removes, 1)
+end)
+
+test('writes: findPreset resolves by name or uuid and rejects ambiguity', function()
+  local folders = {
+    { name = 'Color', presets = { { name = 'Warm', uuid = 'U1', preset = 'p1' }, { name = 'Cool', uuid = 'U2', preset = 'p2' } } },
+    { name = 'User', presets = { { name = 'warm', uuid = 'U3', preset = 'p3' } } },
+  }
+  eq(Writes.findPreset(folders, { name = 'cool' }).preset, 'p2')
+  eq(Writes.findPreset(folders, { uuid = 'u3' }).folder, 'User')
+  local tooMany = badRequest(Writes.findPreset, folders, { name = 'WARM' })
+  assert(tooMany.message:find('Color/Warm (U1)', 1, true) and tooMany.message:find('User/warm (U3)', 1, true), tooMany.message)
+  badRequest(Writes.findPreset, folders, { name = 'nope' })
+  badRequest(Writes.parsePreset, {})
+  badRequest(Writes.parsePreset, { name = 'x', amount = 201 })
+  eq(Writes.parsePreset({ name = 'x', amount = 50 }).amount, 50)
+end)
+
+test('writes: parseRestore keeps recorded values as-is and drops nulls', function()
+  local changes = Writes.parseRestore({
+    changes = { { id = 1, develop = { Exposure2012 = 0.5, Contrast2012 = json.null }, rating = 0, flag = 'picked', label = 'red', keywordsAdded = { 'A' } } },
+  }, keyTypes)
+  eq(changes[1].develop.Exposure2012, 0.5)
+  eq(changes[1].develop.Contrast2012, nil)
+  eq(changes[1].rating, 0)
+  eq(changes[1].pickStatus, 1)
+  eq(#changes[1].keywordsAdded, 1)
+  badRequest(Writes.parseRestore, { changes = {} }, keyTypes)
+  badRequest(Writes.parseRestore, { changes = { { id = 'x' } } }, keyTypes)
+  local look = Writes.parseRestore({ changes = { { id = 1, develop = { Look = { Name = 'Adobe Color' } } } } })
+  eq(look[1].develop.Look.Name, 'Adobe Color')
+  local curve = Writes.parseRestore(json.decode('{"changes":[{"id":1,"develop":{"ToneCurvePV2012":[0,0,255,255]}}]}'))
+  eq(getmetatable(curve[1].develop.ToneCurvePV2012), nil)
+  eq(curve[1].develop.ToneCurvePV2012[3], 255)
+end)
+
+local function writeFixture(opts)
+  local log = {}
+  local photos = {}
+  local function newPhoto(id, props)
+    local photo = { localIdentifier = id, develop = props.develop or {}, meta = props.meta or {}, keywords = props.keywords or {} }
+    function photo:getDevelopSettings() return self.develop end
+    function photo:applyDevelopSettings(values, name)
+      log[#log + 1] = 'apply:' .. id .. ':' .. name
+      for k, v in pairs(values) do self.develop[k] = v end
+    end
+    function photo:getRawMetadata(key)
+      if key == 'keywords' then return self.keywords end
+      return self.meta[key]
+    end
+    function photo:setRawMetadata(key, value)
+      log[#log + 1] = 'set:' .. id .. ':' .. key .. '=' .. tostring(value)
+      self.meta[key] = value
+    end
+    function photo:addKeyword(kw) log[#log + 1] = 'addKeyword:' .. id .. ':' .. kw:getName() self.keywords[#self.keywords + 1] = kw end
+    function photo:removeKeyword(kw) log[#log + 1] = 'removeKeyword:' .. id .. ':' .. kw:getName() end
+    photos[id] = photo
+    return photo
+  end
+  newPhoto(1, { develop = { Exposure2012 = 1, Contrast2012 = 0 }, meta = { rating = 2, pickStatus = 0 } })
+  newPhoto(2, { develop = {}, meta = { isVideo = true } })
+  local roots = keywordTree()
+  local catalog = {}
+  function catalog:getAllPhotos() return { photos[1], photos[2] } end
+  function catalog:getTargetPhoto() return nil end
+  function catalog:batchGetRawMetadata(list)
+    local out = {}
+    for _, p in ipairs(list) do out[p] = { isVideo = p.meta.isVideo } end
+    return out
+  end
+  function catalog:batchGetFormattedMetadata(list)
+    local out = {}
+    for _, p in ipairs(list) do out[p] = { fileName = 'img' .. p.localIdentifier .. '.jpg' } end
+    return out
+  end
+  function catalog:withWriteAccessDo(name, fn, params)
+    log[#log + 1] = 'gate:' .. name .. ':' .. tostring(params.timeout)
+    fn()
+    return opts and opts.status or 'executed'
+  end
+  function catalog:getKeywords() return roots end
+  function catalog:createKeyword(name, _, _, parent)
+    log[#log + 1] = 'create:' .. name
+    local kw = { localIdentifier = 900, parent = parent }
+    function kw:getName() return name end
+    function kw:getChildren() return {} end
+    function kw:getParent() return self.parent end
+    return kw
+  end
+  return catalog, photos, log
+end
+
+local function loadWriteHandlers(catalog, modules)
+  _G.import = function(name)
+    if name == 'LrApplication' then
+      return { activeCatalog = function() return catalog end, developPresetFolders = function() return {} end }
+    end
+    if modules and modules[name] then
+      return modules[name]
+    end
+    return { pcall = pcall }
+  end
+  package.loaded.WriteHandlers = nil
+  package.loaded.DevelopKeys = nil
+  return require('WriteHandlers').new()
+end
+
+test('handlers: apply writes all photos in one gate and reports before/after', function()
+  local catalog, photos, log = writeFixture()
+  local handlers = loadWriteHandlers(catalog)
+  local reply = handlers.apply({ photos = { 1 }, set = { Contrast2012 = 15 }, add = { Exposure2012 = 0.5 } })
+  eq(table.concat(log, ' '), 'gate:lrcli apply:10 apply:1:lrcli apply')
+  local entry = reply.photos[1]
+  eq(entry.filename, 'img1.jpg')
+  eq(entry.before.Exposure2012, 1)
+  eq(entry.after.Exposure2012, 1.5)
+  eq(entry.after.Contrast2012, 15)
+  eq(reply.target, 'ids')
+end)
+
+test('handlers: apply refuses videos per photo without opening a gate for them', function()
+  local catalog, _, log = writeFixture()
+  local handlers = loadWriteHandlers(catalog)
+  local reply = handlers.apply({ photos = { 2 }, set = { Contrast2012 = 15 } })
+  assert(reply.photos[1].error, 'expected an error entry')
+  eq(#log, 0)
+end)
+
+test('handlers: apply reports write_busy', function()
+  local catalog = writeFixture({ status = 'aborted' })
+  local handlers = loadWriteHandlers(catalog)
+  eq(badRequest(handlers.apply, { photos = { 1 }, set = { Contrast2012 = 1 } }).code, 'write_busy')
+end)
+
+test('handlers: rate writes nil for zero and skips unchanged photos', function()
+  local catalog, photos, log = writeFixture()
+  local handlers = loadWriteHandlers(catalog)
+  local reply = handlers.rate({ photos = { 1 }, rating = 0 })
+  eq(table.concat(log, ' '), 'gate:lrcli rate:10 set:1:rating=nil')
+  eq(reply.photos[1].before, 2)
+  eq(reply.photos[1].after, 0)
+  log[#log] = nil
+  log[#log] = nil
+  handlers.rate({ photos = { 1 }, rating = 0 })
+  eq(#log, 0)
+end)
+
+test('handlers: flag and label write SDK values', function()
+  local catalog, _, log = writeFixture()
+  local handlers = loadWriteHandlers(catalog)
+  local flagged = handlers.flag({ photos = { 1 }, flag = 'rejected' })
+  eq(flagged.photos[1].after, 'rejected')
+  local labelled = handlers.label({ photos = { 1 }, label = 'blue' })
+  eq(labelled.photos[1].before, 'none')
+  eq(labelled.photos[1].after, 'blue')
+  assert(table.concat(log, ' '):find('set:1:pickStatus=-1', 1, true))
+  assert(table.concat(log, ' '):find('set:1:colorNameForLabel=blue', 1, true))
+end)
+
+test('handlers: tag creates missing keywords inside the gate and reports only changes', function()
+  local catalog, _, log = writeFixture()
+  local handlers = loadWriteHandlers(catalog)
+  local reply = handlers.tag({ photos = { 1 }, add = { 'Portrait > Outdoor', 'Misc' } })
+  eq(table.concat(log, ' '), 'gate:lrcli tag:10 create:Outdoor addKeyword:1:Outdoor addKeyword:1:Misc')
+  eq(json.encode(reply.photos[1].added), '["Portrait > Outdoor","Misc"]')
+  eq(json.encode(reply.photos[1].removed), '[]')
+  eq(badRequest(handlers.tag, { photos = { 1 }, remove = { 'Nope' } }).code, 'bad_request')
+  eq(badRequest(handlers.tag, { photos = { 1 }, add = { 'Studio' } }).code, 'bad_request')
+end)
+
+test('handlers: restore applies recorded values in one undo gate', function()
+  local catalog, _, log = writeFixture()
+  local handlers = loadWriteHandlers(catalog)
+  local reply = handlers.restore({
+    changes = {
+      { id = 1, develop = { Exposure2012 = 0 }, rating = 5, flag = 'none', label = 'none', keywordsRemoved = { 'Misc' } },
+      { id = 99, rating = 1 },
+    },
+  })
+  eq(table.concat(log, ' '), 'gate:lrcli undo:10 apply:1:lrcli undo set:1:rating=5 set:1:pickStatus=0 set:1:colorNameForLabel=none addKeyword:1:Misc')
+  eq(json.encode(reply.photos[1].restored), '["develop","rating","flag","label","keywords"]')
+  assert(reply.photos[2].error, 'missing photo is reported per photo')
+end)
+
+test('writes: ranges pick raw or non-raw by file format and flag out-of-range numbers', function()
+  local all = { raw = { Temperature = { 2000, 50000 } }, nonRaw = { Temperature = { -100, 100 }, Exposure2012 = { -5, 5 } } }
+  eq(Writes.rangesFor(all, 'RAW'), all.raw)
+  eq(Writes.rangesFor(all, 'DNG'), all.raw)
+  eq(Writes.rangesFor(all, 'TIFF'), all.nonRaw)
+  eq(Writes.rangesFor(all, nil), all.nonRaw)
+  eq(Writes.rangeError({ Exposure2012 = 12 }, all.nonRaw), "Exposure2012=12 is outside Lightroom's range -5..5.")
+  eq(Writes.rangeError({ Exposure2012 = 5, Unknown = 1e9, WhiteBalance = 'x' }, all.nonRaw), nil)
+  eq(Writes.rangeError({ Temperature = 5500 }, all.raw), nil)
+  assert(Writes.rangeError({ Temperature = 5500 }, all.nonRaw), 'raw temperature is out of the non-raw range')
+end)
+
+test('writes: parseUndoNative validates expectations', function()
+  local parsed = Writes.parseUndoNative(json.decode(
+    '{"expect":[{"id":1,"develop":{"A":1,"B":null},"rating":0,"flag":"picked","label":"red","keywordsPresent":["K"]}],'
+    .. '"keep":[{"id":2,"keywordsAbsent":["J"]}]}'))
+  eq(parsed.expect[1].develop.B, json.null)
+  eq(parsed.expect[1].flag, 'picked')
+  eq(parsed.expect[1].rating, 0)
+  eq(parsed.keep[1].keywordsAbsent[1], 'J')
+  eq(#Writes.parseUndoNative({ expect = { { id = 1 } } }).keep, 0)
+  badRequest(Writes.parseUndoNative, {})
+  badRequest(Writes.parseUndoNative, { expect = { { id = 'x' } } })
+  badRequest(Writes.parseUndoNative, { expect = { { id = 1, rating = 9 } } })
+end)
+
+test('writes: mismatch compares with tolerance, absent keys, tables and keywords', function()
+  local expected = Writes.parseUndoNative(json.decode(
+    '{"expect":[{"id":1,"develop":{"A":0.5,"B":null,"T":[1,2]},"rating":3,"keywordsPresent":["P"],"keywordsAbsent":["Q"]}]}')).expect[1]
+  local state = { develop = { A = 0.5 + 1e-9, T = { 1, 2 } }, rating = 3, keywordPaths = { p = true } }
+  eq(Writes.mismatch(state, expected), nil)
+  state.develop.B = 4
+  eq(Writes.mismatch(state, expected), 'photo 1: B is 4, expected absent')
+  state.develop.B = nil
+  state.develop.A = 0.6
+  eq(Writes.mismatch(state, expected), 'photo 1: A is 0.6, expected 0.5')
+  state.develop.A = 0.5
+  state.develop.T = { 1, 3 }
+  assert(Writes.mismatch(state, expected):find('T is'), 'table difference')
+  state.develop.T = { 1, 2 }
+  state.rating = 2
+  eq(Writes.mismatch(state, expected), 'photo 1: rating is 2, expected 3')
+  state.rating = 3
+  state.keywordPaths = {}
+  eq(Writes.mismatch(state, expected), 'photo 1: keyword "P" is missing')
+  state.keywordPaths = { p = true, q = true }
+  eq(Writes.mismatch(state, expected), 'photo 1: keyword "Q" is still present')
+end)
+
+test('handlers: apply rejects out-of-range values per photo before writing', function()
+  local catalog, _, log = writeFixture()
+  local handlers = loadWriteHandlers(catalog)
+  local reply = handlers.apply({ photos = { 1 }, set = { Exposure2012 = 12 } })
+  eq(reply.photos[1].error, "Exposure2012=12 is outside Lightroom's range -5..5.")
+  eq(#log, 0)
+  local relative = handlers.apply({ photos = { 1 }, add = { Exposure2012 = 4.5 } })
+  eq(relative.photos[1].error, "Exposure2012=5.5 is outside Lightroom's range -5..5.")
+end)
+
+local function undoFixture(afterUndo)
+  local catalog, photos = writeFixture()
+  local calls = {}
+  local undo = {
+    canUndo = function() return true end,
+    undo = function() calls[#calls + 1] = 'undo' afterUndo(photos) end,
+    redo = function() calls[#calls + 1] = 'redo' end,
+  }
+  local handlers = loadWriteHandlers(catalog, { LrUndo = undo, LrTasks = { pcall = pcall, sleep = function() end } })
+  return handlers, calls
+end
+
+test('handlers: undo_native keeps the undo when expected and kept states match', function()
+  local handlers, calls = undoFixture(function(photos) photos[1].develop.Exposure2012 = nil end)
+  local reply = handlers.undo_native({
+    expect = { { id = 1, develop = { Exposure2012 = json.null }, rating = 2 } },
+    keep = { { id = 1, develop = { Contrast2012 = 0 } } },
+  })
+  eq(reply.native, true)
+  eq(table.concat(calls, ' '), 'undo')
+end)
+
+test('handlers: undo_native redoes when the state is not reached or a kept state changed', function()
+  local handlers, calls = undoFixture(function() end)
+  local reply = handlers.undo_native({ expect = { { id = 1, develop = { Exposure2012 = 0 } } } })
+  eq(reply.native, false)
+  assert(reply.reason:find('Exposure2012 is 1'), reply.reason)
+  eq(table.concat(calls, ' '), 'undo redo')
+
+  handlers, calls = undoFixture(function(photos) photos[1].develop.Contrast2012 = 9 end)
+  reply = handlers.undo_native({ expect = { { id = 1, rating = 2 } }, keep = { { id = 1, develop = { Contrast2012 = 0 } } } })
+  eq(reply.native, false)
+  assert(reply.reason:find('earlier step not preserved'), reply.reason)
+  eq(table.concat(calls, ' '), 'undo redo')
+
+  handlers = undoFixture(function() end)
+  assert(handlers.undo_native({ expect = { { id = 77, rating = 1 } } }).reason:find('no longer in the catalog'))
+end)
+
+test('handlers: undo_native does nothing when LrUndo has nothing to undo', function()
+  local catalog = writeFixture()
+  local calls = {}
+  local handlers = loadWriteHandlers(catalog, { LrUndo = {
+    canUndo = function() return false end,
+    undo = function() calls[#calls + 1] = 'undo' end,
+  } })
+  local reply = handlers.undo_native({ expect = { { id = 1, rating = 2 } } })
+  eq(reply.native, false)
+  eq(reply.reason, 'nothing to undo')
+  eq(#calls, 0)
 end)
 
 test('Version matches Info.lua', function()

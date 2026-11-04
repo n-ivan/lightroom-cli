@@ -32,11 +32,16 @@ function Targets.parseIds(value)
 end
 
 -- The SDK documents no lookup by localIdentifier, so index the whole catalog.
-function Targets.lookup(catalog, ids)
+function Targets.index(catalog)
   local byId = {}
   for _, photo in ipairs(catalog:getAllPhotos()) do
     byId[photo.localIdentifier] = photo
   end
+  return byId
+end
+
+function Targets.lookup(catalog, ids)
+  local byId = Targets.index(catalog)
   local photos, missing = {}, {}
   for _, id in ipairs(ids) do
     local photo = byId[id]
@@ -71,6 +76,21 @@ function Targets.resolve(catalog, ids)
     fail('no_photo_selected', 'Nothing is selected in Lightroom. Pass --photo <id> (see `lrcli search`).')
   end
   return photos, 'selection'
+end
+
+function Targets.describe(catalog, photos)
+  local raw = catalog:batchGetRawMetadata(photos, { 'isVideo' })
+  local formatted = catalog:batchGetFormattedMetadata(photos, { 'fileName' })
+  local infos = {}
+  for i, photo in ipairs(photos) do
+    infos[i] = {
+      id = photo.localIdentifier,
+      photo = photo,
+      filename = (formatted[photo] or {}).fileName or '',
+      isVideo = (raw[photo] or {}).isVideo == true,
+    }
+  end
+  return infos
 end
 
 function Targets.sameIds(photos, ids)

@@ -1,11 +1,12 @@
 use std::fs::DirBuilder;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
 use super::Context;
+use crate::clock;
 use crate::error::Error;
 use crate::stats;
 
@@ -49,28 +50,10 @@ pub fn preview_args(options: &PreviewOptions, dir: &Path) -> Value {
 
 /// UTC, so batch directory names sort chronologically regardless of time zone changes.
 pub fn batch_name(unix_secs: u64, pid: u32) -> String {
-    let days = (unix_secs / 86_400) as i64;
-    let rest = unix_secs % 86_400;
-    // Howard Hinnant's civil_from_days.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let day_of_era = z.rem_euclid(146_097);
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let shifted_month = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
-    let month = if shifted_month < 10 {
-        shifted_month + 3
-    } else {
-        shifted_month - 9
-    };
-    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    let t = clock::utc(unix_secs);
     format!(
-        "{year:04}{month:02}{day:02}-{:02}{:02}{:02}-{pid}",
-        rest / 3600,
-        rest % 3600 / 60,
-        rest % 60
+        "{:04}{:02}{:02}-{:02}{:02}{:02}-{pid}",
+        t.year, t.month, t.day, t.hour, t.minute, t.second
     )
 }
 
@@ -112,10 +95,7 @@ fn create_dir(path: &Path) -> Result<(), Error> {
 
 fn create_batch_dir(previews: &Path) -> Result<(String, PathBuf), Error> {
     create_dir(previews)?;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let name = batch_name(now, std::process::id());
+    let name = batch_name(clock::now_secs(), std::process::id());
     let dir = previews.join(&name);
     create_dir(&dir)?;
     let dir = std::path::absolute(&dir)

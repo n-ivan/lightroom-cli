@@ -18,11 +18,22 @@ Lightroom.
 - `Targets.lua` (pure, catalog injected): resolves explicit ids or the selection.
 - `CatalogHandlers.lua`: the catalog commands (`search`, `select`, `selection`,
   `info`). Merged in by `Handlers.lua`.
+- `DevelopKeys.lua`: GENERATED name-to-type table of develop settings; never
+  edit it, run `scripts/gen-develop-keys.py` (reads the untracked SDK docs).
+- `Writes.lua` (pure): argument validation, develop value computation, keyword
+  tree lookup, preset lookup, the write-gate wrapper. `WriteHandlers.lua`: the
+  catalog write commands (`apply`, `presets`, `preset`, `tag`, `rate`, `flag`,
+  `label`, `restore`); merged in by `Handlers.lua`.
+- `DevelopRanges.lua`: GENERATED min/max per develop key, `raw` and `nonRaw`;
+  never edit it. Regenerate: run `lrcli raw develop_ranges '{"photos":[<id>]}'`
+  on a raw photo and on a non-raw one (e.g. TIFF), save the JSON replies to
+  `scripts/data/develop-ranges-raw.json` / `develop-ranges-nonraw.json`, then run
+  `scripts/gen-develop-ranges.py`.
 - `Preview.lua` (pure): `preview` arg validation, export settings table, result
   assembly.
 - `PreviewHandler.lua`: the `preview` command (export session or cached
   thumbnails); merged in by `Handlers.lua`.
-- `StatusMenuItem.lua`: the Library > Plug-in Extras > "lrcli Status…" item;
+- `StatusMenuItem.lua`: the File > Plug-in Extras > "lrcli Status…" item;
   it also makes `LrForceInitPlugin` effective (see gotchas).
 - `plugin/tests/run.lua`: luajit tests, run from the repo root.
 - `src/lib.rs` and its modules are the reusable library (a future MCP server
@@ -64,8 +75,10 @@ counts as unsupported unless verified live.
 - `catalog:getTargetPhotos()` returns the whole filmstrip when nothing is
   selected; detect "nothing selected" with `catalog:getTargetPhoto() == nil`.
 - Lightroom defers `LrInitPlugin` until the plugin is first used unless Info.lua
-  sets `LrForceInitPlugin = true` and the plugin contributes a menu item
-  (`LrLibraryMenuItems`); both are needed. Even then init waits until the
+  sets `LrForceInitPlugin = true` and the plugin contributes a menu item; both
+  are needed. Use `LrExportMenuItems` (File menu): a `LrLibraryMenuItems` item
+  doesn't count when Lightroom opens in Develop or another module, and init
+  silently never happens. Even then init waits until the
   window has been activated once: `lrcli start` launches with `open -g` and
   activates Lightroom for 0.2 s, then returns focus. A background launch alone
   never initialises the plugin.
@@ -79,10 +92,34 @@ counts as unsupported unless verified live.
 - No `LrShutdownApp`/`LrShutdownPlugin` hooks: they made quitting hang on
   "performing shutdown tasks". Lightroom cancels the server's function context
   on quit, and the broker exits when its connection closes.
+- `applyDevelopSettings` does not clamp: out-of-range values (Exposure2012=12)
+  are stored, and a photo holding them renders as if none of its develop edits
+  applied. `apply` therefore checks `DevelopRanges` (raw vs non-raw by
+  `fileFormat`) and errors per photo; `restore` writes recorded values as-is.
+- `LrUndo` has only `canUndo/canRedo/undo/redo`; there is no way to see what
+  will be undone, and consecutive `withWriteAccessDo` calls without user
+  interaction coalesce into ONE undo step (so a second undo can revert an
+  unrelated action). `undo_native` therefore undoes once, waits 0.3 s, verifies
+  the recorded before-state (absent keys must be nil) and the previous lrcli
+  step's after-state, and redoes if either differs; `lrcli undo` then falls
+  back to `restore`, which cannot clear keys that had no value before.
+- Decoded JSON arrays carry json.lua's marker metatable and must reach the SDK
+  as plain tables (`Writes.plain`); otherwise `withWriteAccessDo` hangs on commit.
 - `LR_jpeg_quality` is 0..1, not 0..100. `LR_size_resizeType = 'longEdge'` is
   constrained by `LR_size_maxHeight`, so set both max values.
 - Server commands run in their own task so the loop keeps ticking; only `ping`
   is answered while one runs (`Dispatch.nextIndex`).
+- `catalog:withWriteAccessDo` returns "aborted" (not an error) when write access
+  isn't granted within the timeout; `Writes.gate` turns that into `write_busy`.
+  Errors thrown inside roll the whole gate back. Every write command makes one
+  gate for all its photos.
+- `colorNameForLabel` accepts only red, yellow, green, blue, purple, none; any
+  other string silently gives a white label. Rating "none" is `nil`, not 0.
+- The SDK has no keyword lookup by name: `Writes.planKeyword` walks
+  `getKeywords()`/`getChildren()`. Keywords created in a gate are unreadable
+  until it ends, so the chain is created and attached in the same gate.
+- The `getDevelopSettings` docs list is incomplete (no Temperature, Tint,
+  Texture) and has typos; the generator script patches both and says how.
 - LrLogger's log location varies by version, so the plugin logs to
   `~/.lrcli/plugin.log`; the last lines also show in Plug-in Manager.
 

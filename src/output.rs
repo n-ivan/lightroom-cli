@@ -1,5 +1,6 @@
 use serde_json::Value;
 
+use lrcli::commands::edit::differs_from_requested;
 use lrcli::error::Error;
 
 const RESTART_HINT: &str = "Run `lrcli restart` so Lightroom Classic loads the plugin.";
@@ -386,6 +387,291 @@ pub fn preview(value: &Value) -> String {
         lines.push("(fast preview: may not reflect recent edits)".to_string());
     }
     lines.join("\n")
+}
+
+fn photo_label(photo: &Value) -> String {
+    format!(
+        "{} (id {})",
+        str_at(photo, "filename").unwrap_or("?"),
+        photo
+            .get("id")
+            .map_or_else(|| "?".to_string(), Value::to_string)
+    )
+}
+
+fn photo_error(photo: &Value) -> Option<String> {
+    str_at(photo, "error").map(|error| format!("{}  error: {error}", photo_label(photo)))
+}
+
+fn display_value(value: &Value) -> String {
+    match value {
+        Value::Null => "-".to_string(),
+        Value::String(text) => text.clone(),
+        Value::Number(number) => match number.as_f64() {
+            Some(float) if float.fract() != 0.0 => format!("{float:.4}")
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_string(),
+            _ => number.to_string(),
+        },
+        other => other.to_string(),
+    }
+}
+
+fn develop_block(photo: &Value) -> String {
+    if let Some(error) = photo_error(photo) {
+        return error;
+    }
+    let mut lines = vec![photo_label(photo)];
+    let after = photo.get("after").and_then(Value::as_object);
+    for (key, after) in after.into_iter().flatten() {
+        let before = photo
+            .pointer(&format!("/before/{key}"))
+            .unwrap_or(&Value::Null);
+        let mut line = format!(
+            "  {key}: {} → {}",
+            display_value(before),
+            display_value(after)
+        );
+        if let Some(requested) = photo.pointer(&format!("/requested/{key}"))
+            && differs_from_requested(after, requested)
+        {
+            line.push_str(&format!(" (requested {})", display_value(requested)));
+        }
+        lines.push(line);
+    }
+    if lines.len() == 1 {
+        lines.push("  (no changes)".to_string());
+    }
+    lines.join("\n")
+}
+
+fn write_footer(value: &Value, lines: &mut Vec<String>) {
+    if let Some(preview_reply) = value.get("preview") {
+        lines.push(String::new());
+        lines.push(preview(preview_reply));
+    }
+    if let Some(message) = value
+        .pointer("/previewError/message")
+        .and_then(Value::as_str)
+    {
+        lines.push(format!("preview failed: {message}"));
+    }
+    if let Some(message) = str_at(value, "historyWarning") {
+        lines.push(format!("warning: {message}"));
+    }
+}
+
+pub fn apply(value: &Value) -> String {
+    let mut lines: Vec<String> = photos_of(value).iter().map(develop_block).collect();
+    write_footer(value, &mut lines);
+    lines.join("\n")
+}
+
+pub fn preset(value: &Value) -> String {
+    let mut lines = vec![format!(
+        "Preset {}/{}",
+        text(value, "/preset/folder"),
+        text(value, "/preset/name")
+    )];
+    lines.extend(photos_of(value).iter().map(develop_block));
+    write_footer(value, &mut lines);
+    lines.join("\n")
+}
+
+pub fn scalar(value: &Value) -> String {
+    let mut lines: Vec<String> = photos_of(value)
+        .iter()
+        .map(|photo| {
+            photo_error(photo).unwrap_or_else(|| {
+                let (before, after) = (
+                    display_value(photo.get("before").unwrap_or(&Value::Null)),
+                    display_value(photo.get("after").unwrap_or(&Value::Null)),
+                );
+                if before == after {
+                    format!("{}: already {after}", photo_label(photo))
+                } else {
+                    format!("{}: {before} → {after}", photo_label(photo))
+                }
+            })
+        })
+        .collect();
+    write_footer(value, &mut lines);
+    lines.join("\n")
+}
+
+pub fn tag(value: &Value) -> String {
+    let names = |photo: &Value, key: &str, sign: &str| -> Vec<String> {
+        photo
+            .get(key)
+            .and_then(Value::as_array)
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|name| format!("{sign}{name}"))
+            .collect()
+    };
+    let mut lines: Vec<String> = photos_of(value)
+        .iter()
+        .map(|photo| {
+            photo_error(photo).unwrap_or_else(|| {
+                let mut changes = names(photo, "added", "+");
+                changes.extend(names(photo, "removed", "-"));
+                let summary = if changes.is_empty() {
+                    "no change".to_string()
+                } else {
+                    changes.join(", ")
+                };
+                format!("{}: {summary}", photo_label(photo))
+            })
+        })
+        .collect();
+    write_footer(value, &mut lines);
+    lines.join("\n")
+}
+
+pub fn presets(value: &Value) -> String {
+    let folders = value
+        .get("folders")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    if folders.is_empty() {
+        return "No develop presets.".to_string();
+    }
+    let mut lines = Vec::new();
+    for folder in folders {
+        lines.push(str_at(folder, "name").unwrap_or("?").to_string());
+        for preset in folder
+            .get("presets")
+            .and_then(Value::as_array)
+            .map_or(&[][..], Vec::as_slice)
+        {
+            lines.push(format!("  {}", str_at(preset, "name").unwrap_or("?")));
+        }
+    }
+    lines.join("\n")
+}
+
+fn change_summary(change: &Value) -> String {
+    let fields: Vec<String> = [
+        ("develop", "develop"),
+        ("rating", "rating"),
+        ("flag", "flag"),
+        ("label", "label"),
+        ("keywordsAdded", "keywords added"),
+        ("keywordsRemoved", "keywords removed"),
+    ]
+    .iter()
+    .filter(|(key, _)| {
+        change.get(*key).is_some_and(|v| match v {
+            Value::Array(list) => !list.is_empty(),
+            other => !other.is_null(),
+        })
+    })
+    .map(|(_, label)| (*label).to_string())
+    .collect();
+    format!(
+        "photo {}: {}",
+        change
+            .get("id")
+            .map_or_else(|| "?".to_string(), Value::to_string),
+        fields.join(", ")
+    )
+}
+
+fn changes_of(item: &Value) -> &[Value] {
+    item.get("changes")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice)
+}
+
+pub fn undo(value: &Value) -> String {
+    let dry_run = value["dryRun"] == true;
+    let items = value
+        .get(if dry_run { "undo" } else { "undone" })
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let mut lines = Vec::new();
+    for item in items {
+        let verb = if dry_run { "Would undo" } else { "Undid" };
+        lines.push(format!(
+            "{verb}: {} ({})",
+            text(item, "/command"),
+            text(item, "/time")
+        ));
+        if !dry_run {
+            lines.push(if item["method"] == "native" {
+                "  undone with Lightroom's undo".to_string()
+            } else {
+                match str_at(item, "nativeSkipped") {
+                    Some(reason) => {
+                        format!("  restored values (Lightroom's undo not used: {reason})")
+                    }
+                    None => "  restored values".to_string(),
+                }
+            });
+        }
+        if dry_run {
+            lines.extend(
+                changes_of(item)
+                    .iter()
+                    .map(|change| format!("  {}", change_summary(change))),
+            );
+            continue;
+        }
+        for photo in photos_of(item) {
+            if let Some(error) = str_at(photo, "error") {
+                lines.push(format!("  {}  error: {error}", photo_label(photo)));
+                continue;
+            }
+            let restored: Vec<&str> = photo
+                .get("restored")
+                .and_then(Value::as_array)
+                .map_or(&[][..], Vec::as_slice)
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            let summary = if restored.is_empty() {
+                "nothing to restore".to_string()
+            } else {
+                format!("restored {}", restored.join(", "))
+            };
+            lines.push(format!("  {}: {summary}", photo_label(photo)));
+            for warning in photo
+                .get("warnings")
+                .and_then(Value::as_array)
+                .map_or(&[][..], Vec::as_slice)
+                .iter()
+                .filter_map(Value::as_str)
+            {
+                lines.push(format!("    warning: {warning}"));
+            }
+        }
+    }
+    lines.join("\n")
+}
+
+pub fn history(value: &Value) -> String {
+    let entries = value
+        .get("entries")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    if entries.is_empty() {
+        return "No recorded changes.".to_string();
+    }
+    entries
+        .iter()
+        .map(|entry| {
+            let count = changes_of(entry).len();
+            let noun = if count == 1 { "photo" } else { "photos" };
+            format!(
+                "{}  {}  ({count} {noun})",
+                text(entry, "/time"),
+                text(entry, "/command")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub fn raw(value: &Value) -> String {
