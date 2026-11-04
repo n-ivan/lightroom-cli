@@ -1,0 +1,21 @@
+# Local, uncommitted notes (spec drafts, scratch)
+/local/
+
+# Node
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+
+# Lightroom scratch catalog and its sidecar data
+testdata/*.lrcat
+testdata/*.lrcat-*
+testdata/*.lrdata/
+testdata/*.lock
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+*.log
