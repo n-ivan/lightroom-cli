@@ -114,7 +114,7 @@ async fn plugin_install_links_the_plugin_and_writes_config() {
     let env = Env::new();
     let out = env.run(&["plugin", "install"]).await;
     assert_eq!(out.code, 0, "{}", out.stderr);
-    assert!(out.stdout.contains("Restart Lightroom Classic"));
+    assert!(out.stdout.contains("lrcli restart"));
 
     let link = fs::read_link(env.target()).unwrap();
     assert!(link.ends_with("plugin/lrcli.lrdevplugin"), "{link:?}");

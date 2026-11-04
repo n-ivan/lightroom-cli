@@ -1,6 +1,6 @@
 use std::fmt;
 
-pub const UNREACHABLE_MESSAGE: &str = "Can't reach Lightroom. Is Lightroom Classic running with the lrcli plugin installed? Run `lrcli plugin install`, restart Lightroom Classic, then open File > Plug-in Manager and select lrcli once (Lightroom only starts plugins when first used).";
+pub const UNREACHABLE_MESSAGE: &str = "Can't reach Lightroom. Is Lightroom Classic running with the lrcli plugin installed? Run `lrcli start` to launch it (or `lrcli plugin install` then `lrcli restart` if the plugin isn't installed yet).";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {

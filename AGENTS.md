@@ -22,12 +22,14 @@ Lightroom.
   assembly.
 - `PreviewHandler.lua`: the `preview` command (export session or cached
   thumbnails); merged in by `Handlers.lua`.
+- `StatusMenuItem.lua`: the Library > Plug-in Extras > "lrcli Status…" item;
+  it also makes `LrForceInitPlugin` effective (see gotchas).
 - `plugin/tests/run.lua`: luajit tests, run from the repo root.
 - `src/lib.rs` and its modules are the reusable library (a future MCP server
   should depend on it): `client.rs` (CLI to broker), `broker.rs`,
   `plugin_link.rs` (broker to plugin, id multiplexing), `protocol.rs`,
   `paths.rs`, `error.rs`, `log.rs`, `commands/`, `platform/` (OS-specific
-  paths), `stats.rs` (JPEG luminance and clipping stats; no printing).
+  paths, app launch/quit; `LRCLI_FAKE_APP=running|stopped` fakes them in tests), `stats.rs` (JPEG luminance and clipping stats; no printing).
 - `src/main.rs` (clap, exit mapping) and `src/output.rs` (human/JSON printing)
   are the only places that print or exit.
 - `tests/`: integration tests spawn the built binary. `tests/common/mod.rs`
@@ -61,11 +63,12 @@ counts as unsupported unless verified live.
   open.
 - `catalog:getTargetPhotos()` returns the whole filmstrip when nothing is
   selected; detect "nothing selected" with `catalog:getTargetPhoto() == nil`.
-- Lightroom defers `LrInitPlugin` until the plugin is first used (opening
-  Plug-in Manager works); launching or focusing the app is not enough.
+- Lightroom defers `LrInitPlugin` until the plugin is first used unless Info.lua
+  sets `LrForceInitPlugin = true` and the plugin contributes a menu item
+  (`LrLibraryMenuItems`); both are needed.
 - Lightroom indexes a plugin's `.lua` files at startup: Reload Plug-in picks up
   edits to existing files, but a newly added file fails with "Could not load
-  toolkit script: <name>" until Lightroom restarts. On any init failure,
+  toolkit script: <name>" until Lightroom restarts (use `lrcli restart`). On any init failure,
   `Init.lua` logs per-file compile and load errors to find the real cause.
 - A reloaded plugin gets a fresh global environment, so a previous instance
   can't be reached through `_G`. The newest instance wins via

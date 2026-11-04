@@ -1,5 +1,6 @@
 mod output;
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -14,12 +15,15 @@ use lrcli::error::Error;
 use lrcli::paths::Paths;
 
 const DEFAULT_TIMEOUT_SECS: f64 = 30.0;
+const STOP_WAIT_SECS: f64 = 60.0;
 
 const ABOUT_EXAMPLES: &str = "\
 Examples:
   lrcli status                 Check that Lightroom Classic is reachable
   lrcli --json status          Same, as JSON for scripts and agents
   lrcli plugin install         Link the plugin into Lightroom Classic
+  lrcli start                  Launch Lightroom Classic and wait for the plugin
+  lrcli restart                Quit and relaunch Lightroom Classic
   lrcli search --rating '>=4' --flag picked
                                Find photos in the catalog
   lrcli info --photo 123       Show a photo's metadata
@@ -82,6 +86,81 @@ JSON output:
 Exit 3 means Lightroom Classic or its plugin is not running; exit 4 means the
 plugin rejected this lrcli (version or token mismatch).")]
     Status,
+
+    /// Launch Lightroom Classic and wait until the plugin answers
+    #[command(after_help = "\
+Does nothing (exit 0) if the plugin already answers. If Lightroom Classic is
+running but the plugin doesn't answer, it is brought to the front (Lightroom
+may defer plugin start-up until its window is active) and lrcli waits.
+Otherwise Lightroom Classic is launched, with --catalog if given, and lrcli
+waits up to --wait seconds (default 120) for the plugin to answer, then prints
+the same output as `status`.
+
+--catalog must be an existing .lrcat file (exit 2 otherwise). If Lightroom
+already has a different catalog open, start fails (exit 1): use
+`lrcli restart --catalog PATH` to switch. macOS only.
+
+The first time lrcli controls Lightroom, macOS asks whether your terminal app
+may automate Lightroom Classic (System Settings > Privacy & Security >
+Automation). Allow it.
+
+Examples:
+  lrcli start
+  lrcli start --catalog ~/Pictures/Lightroom/main.lrcat --wait 300
+  lrcli --json start
+
+JSON output:
+  The `status` reply plus \"started\": true if this call launched or woke
+  Lightroom, false if the plugin was already answering.
+
+Exit 3 means the plugin didn't answer in time: check Lightroom for a dialog
+(catalog upgrade, update prompt, \"What's New\") or open Library > Plug-in
+Extras > lrcli Status..., and run `lrcli plugin install` if the plugin isn't
+installed.")]
+    Start {
+        #[command(flatten)]
+        launch: LaunchArgs,
+    },
+
+    /// Quit Lightroom Classic and wait until it has exited
+    #[command(after_help = "\
+Asks Lightroom Classic to quit (like Cmd+Q) and waits up to --wait seconds
+(default 60) for the app to exit and the broker to disappear. It never
+force-kills: if Lightroom shows a dialog (for example a catalog backup), answer
+it, or the command fails with exit 1 after --wait. Exit 0 and \"not running\"
+if Lightroom wasn't running. macOS only; the first quit triggers the macOS
+Automation permission prompt for your terminal app.
+
+Examples:
+  lrcli stop
+  lrcli stop --wait 300
+
+JSON output:
+  {\"ok\":true,\"stopped\":true}; \"stopped\" is false if it wasn't running.")]
+    Stop {
+        /// Seconds to wait for Lightroom Classic to exit
+        #[arg(long, value_name = "SECS", default_value = "60", value_parser = parse_secs)]
+        wait: f64,
+    },
+
+    /// Quit and relaunch Lightroom Classic (picks up new plugin files)
+    #[command(after_help = "\
+Runs `lrcli stop`, then `lrcli start`. Use it after `lrcli plugin install` or
+after adding plugin files, because Lightroom only loads new plugin files at
+startup. Without --catalog, Lightroom opens its default catalog. --wait is the
+time to wait for the plugin after relaunching (default 120); quitting waits up
+to 60 s. macOS only; see `lrcli stop` for the Automation permission prompt.
+
+Examples:
+  lrcli restart
+  lrcli restart --catalog ~/Pictures/Lightroom/other.lrcat
+
+JSON output:
+  Same as `lrcli start`.")]
+    Restart {
+        #[command(flatten)]
+        launch: LaunchArgs,
+    },
 
     /// Find photos in the catalog by rating, flag, label, keyword, date and more
     #[command(after_help = "\
@@ -261,8 +340,8 @@ it can start the broker. Run it again after moving the lrcli binary.
 An existing correct link is left alone. Anything else at the target is
 refused unless --force is given.
 
-After installing, restart Lightroom Classic, then open File > Plug-in Manager
-and select lrcli once: Lightroom only starts plugins when they are first used.
+After installing, run `lrcli restart` (or `lrcli start` if Lightroom Classic is
+not running) so Lightroom loads the plugin.
 
 Examples:
   lrcli plugin install
@@ -302,6 +381,17 @@ Examples:
 JSON output:
   {\"ok\":true,\"source\":\"...\",\"target\":\"...\",\"config\":\"...\"}")]
     Path,
+}
+
+#[derive(Args)]
+struct LaunchArgs {
+    /// Catalog (.lrcat) to open when launching Lightroom Classic
+    #[arg(long, value_name = "PATH")]
+    catalog: Option<PathBuf>,
+
+    /// Seconds to wait for the plugin to answer
+    #[arg(long, value_name = "SECS", default_value = "120", value_parser = parse_secs)]
+    wait: f64,
 }
 
 #[derive(Args)]
@@ -474,6 +564,32 @@ async fn run(cli: Cli, json: bool) -> u8 {
     };
     match cli.command {
         Command::Status => output::emit(commands::status::run(&ctx).await, json, output::status),
+        Command::Start { launch } => output::emit(
+            commands::lifecycle::start(
+                &ctx,
+                launch.catalog.as_deref(),
+                Duration::from_secs_f64(launch.wait),
+            )
+            .await,
+            json,
+            output::start,
+        ),
+        Command::Stop { wait } => output::emit(
+            commands::lifecycle::stop(&ctx, Duration::from_secs_f64(wait)).await,
+            json,
+            output::stop,
+        ),
+        Command::Restart { launch } => output::emit(
+            commands::lifecycle::restart(
+                &ctx,
+                launch.catalog.as_deref(),
+                Duration::from_secs_f64(STOP_WAIT_SECS),
+                Duration::from_secs_f64(launch.wait),
+            )
+            .await,
+            json,
+            output::start,
+        ),
         Command::Search(args) => {
             let ids = args.ids;
             let result = commands::photos::search(&ctx, &(*args).into(), ids).await;

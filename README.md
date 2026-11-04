@@ -21,8 +21,8 @@ broker is its hidden `broker` subcommand.
 lrcli status ──unix socket ~/.lrcli/broker.sock──▶ lrcli broker ──TCP (persistent)──▶ LrC plugin
 ```
 
-Lightroom Classic must be running with a catalog open. Its window can be
-hidden.
+Lightroom Classic must be running with a catalog open (`lrcli start` launches
+it). Its window can be hidden.
 
 ## Requirements
 
@@ -38,13 +38,18 @@ cargo install --path .     # or put target/release/lrcli on your PATH
 lrcli plugin install
 ```
 
-Then restart Lightroom Classic. Lightroom defers plugin start-up until the
-plugin is first used, so open **File > Plug-in Manager** and select lrcli once;
-its status panel shows the plugin log. Then check the connection:
+Then start (or restart) Lightroom Classic so it loads the plugin, and check the
+connection:
 
 ```sh
+lrcli restart
 lrcli status
 ```
+
+The plugin forces Lightroom to initialise it at startup (`LrForceInitPlugin`
+plus a menu item), so no manual Plug-in Manager step is needed. If something
+goes wrong, open **Library > Plug-in Extras > lrcli Status…** to see the
+plugin's recent log.
 
 `plugin install` symlinks `plugin/lrcli.lrdevplugin` into Lightroom's Modules
 directory and records this binary's path in `~/.lrcli/config.json` so the
@@ -69,12 +74,21 @@ the plugin), `plugin.log`, `broker.sock`, `broker.log`, `config.json`.
 ## Commands
 
 ```sh
+lrcli start [--catalog PATH] [--wait SECS]                     # launch Lightroom and wait for the plugin
+lrcli stop [--wait SECS]                                       # quit Lightroom (never force-kills)
+lrcli restart [--catalog PATH]                                 # stop, then start
 lrcli search --rating '>=4' --flag picked --since 2024-01-01   # table of matching photos
 lrcli search --keyword portrait --ids | lrcli select --photos - # ids in, selection out
 lrcli selection                                                # what is selected in Lightroom
 lrcli info --photo 42 --develop                                # metadata, EXIF, develop settings
 lrcli preview --photo 42 --size 1200                           # JPEG preview with current edits, plus stats
 ```
+
+`start`, `stop` and `restart` control the Lightroom Classic app (macOS only).
+`start` does nothing if the plugin already answers; with `--catalog` it fails if
+a different catalog is open (use `restart --catalog`). The first time, macOS
+asks whether your terminal app may control Lightroom Classic (Automation
+permission); allow it.
 
 Photos are identified by the catalog's local id (the `ID` column of `search`).
 `info` and `select` take repeated `--photo <id>`, or `--photos -` to read ids

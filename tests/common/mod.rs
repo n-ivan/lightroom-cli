@@ -285,6 +285,20 @@ pub async fn run_env(home: &Path, args: &[&str], env: &[(&str, &Path)]) -> Out {
     }
 }
 
+pub async fn run_fake_app(home: &Path, args: &[&str], app: &str) -> Out {
+    let mut command = lrcli(home);
+    command.args(args).env("LRCLI_FAKE_APP", app);
+    let output = timeout(Duration::from_secs(20), command.output())
+        .await
+        .expect("lrcli hung")
+        .unwrap();
+    Out {
+        code: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
 pub async fn run_stdin(home: &Path, args: &[&str], input: &str) -> Out {
     let mut command = lrcli(home);
     command

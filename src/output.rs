@@ -2,7 +2,7 @@ use serde_json::Value;
 
 use lrcli::error::Error;
 
-const RESTART_HINT: &str = "Restart Lightroom Classic, then open File > Plug-in Manager and select lrcli once so the plugin starts.";
+const RESTART_HINT: &str = "Run `lrcli restart` so Lightroom Classic loads the plugin.";
 
 pub type Formatter = fn(&Value) -> String;
 
@@ -59,6 +59,23 @@ pub fn status(value: &Value) -> String {
         text(value, "/broker/version"),
         number(value, "/broker/pid"),
     )
+}
+
+pub fn start(value: &Value) -> String {
+    let headline = if value["started"] == true {
+        "Lightroom Classic started."
+    } else {
+        "Lightroom Classic is already running."
+    };
+    format!("{headline}\n{}", status(value))
+}
+
+pub fn stop(value: &Value) -> String {
+    if value["stopped"] == true {
+        "Lightroom Classic quit.".to_string()
+    } else {
+        "Lightroom Classic is not running.".to_string()
+    }
 }
 
 pub fn plugin_install(value: &Value) -> String {
@@ -413,7 +430,7 @@ mod tests {
     fn install_output_mentions_restart_only_when_something_changed() {
         let installed =
             json!({ "action": "installed", "source": "/s", "target": "/t", "brokerPath": "/b" });
-        assert!(plugin_install(&installed).contains("Restart Lightroom Classic"));
+        assert!(plugin_install(&installed).contains("lrcli restart"));
         let unchanged =
             json!({ "action": "unchanged", "source": "/s", "target": "/t", "brokerPath": "/b" });
         assert!(!plugin_install(&unchanged).contains("Restart"));

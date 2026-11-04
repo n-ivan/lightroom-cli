@@ -5,5 +5,9 @@ return {
   LrPluginName = 'lrcli',
   LrInitPlugin = 'Init.lua',
   LrPluginInfoProvider = 'PluginInfoProvider.lua',
+  LrForceInitPlugin = true,
+  LrLibraryMenuItems = {
+    { title = 'lrcli Status…', file = 'StatusMenuItem.lua' },
+  },
   VERSION = { major = 0, minor = 1, revision = 0 },
 }
