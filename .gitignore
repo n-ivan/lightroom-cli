@@ -1,18 +1,14 @@
 # Local, uncommitted notes (spec drafts, scratch)
 /local/
 
-# Node
-node_modules/
-dist/
-coverage/
-*.tsbuildinfo
-npm-debug.log*
+# Rust
+/target/
 
 # Lightroom scratch catalog and its sidecar data
-testdata/*.lrcat
-testdata/*.lrcat-*
-testdata/*.lrdata/
-testdata/*.lock
+testdata/**/*.lrcat
+testdata/**/*.lrcat-*
+testdata/**/*.lrcat.lock
+testdata/**/*.lrdata/
 
 # OS / editor
 .DS_Store
