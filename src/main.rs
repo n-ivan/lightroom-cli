@@ -89,12 +89,13 @@ plugin rejected this lrcli (version or token mismatch).")]
 
     /// Launch Lightroom Classic and wait until the plugin answers
     #[command(after_help = "\
-Does nothing (exit 0) if the plugin already answers. If Lightroom Classic is
-running but the plugin doesn't answer, it is brought to the front (Lightroom
-may defer plugin start-up until its window is active) and lrcli waits.
-Otherwise Lightroom Classic is launched, with --catalog if given, and lrcli
+Does nothing (exit 0) if the plugin already answers. Otherwise Lightroom
+Classic is launched in the background (with --catalog if given) and lrcli
 waits up to --wait seconds (default 120) for the plugin to answer, then prints
-the same output as `status`.
+the same output as `status`. Lightroom only starts plugins once its window has
+been active, so lrcli activates it for a fraction of a second and returns
+focus to the app you were using (repeated every 15 s while waiting);
+--foreground leaves Lightroom in front instead.
 
 --catalog must be an existing .lrcat file (exit 2 otherwise). If Lightroom
 already has a different catalog open, start fails (exit 1): use
@@ -392,6 +393,11 @@ struct LaunchArgs {
     /// Seconds to wait for the plugin to answer
     #[arg(long, value_name = "SECS", default_value = "120", value_parser = parse_secs)]
     wait: f64,
+
+    /// Leave Lightroom Classic in front instead of returning focus to the
+    /// current app after the brief activation the plugin needs to start
+    #[arg(long)]
+    foreground: bool,
 }
 
 #[derive(Args)]
@@ -569,6 +575,7 @@ async fn run(cli: Cli, json: bool) -> u8 {
                 &ctx,
                 launch.catalog.as_deref(),
                 Duration::from_secs_f64(launch.wait),
+                launch.foreground,
             )
             .await,
             json,
@@ -585,6 +592,7 @@ async fn run(cli: Cli, json: bool) -> u8 {
                 launch.catalog.as_deref(),
                 Duration::from_secs_f64(STOP_WAIT_SECS),
                 Duration::from_secs_f64(launch.wait),
+                launch.foreground,
             )
             .await,
             json,

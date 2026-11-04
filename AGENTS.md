@@ -65,7 +65,10 @@ counts as unsupported unless verified live.
   selected; detect "nothing selected" with `catalog:getTargetPhoto() == nil`.
 - Lightroom defers `LrInitPlugin` until the plugin is first used unless Info.lua
   sets `LrForceInitPlugin = true` and the plugin contributes a menu item
-  (`LrLibraryMenuItems`); both are needed.
+  (`LrLibraryMenuItems`); both are needed. Even then init waits until the
+  window has been activated once: `lrcli start` launches with `open -g` and
+  activates Lightroom for 0.2 s, then returns focus. A background launch alone
+  never initialises the plugin.
 - Lightroom indexes a plugin's `.lua` files at startup: Reload Plug-in picks up
   edits to existing files, but a newly added file fails with "Could not load
   toolkit script: <name>" until Lightroom restarts (use `lrcli restart`). On any init failure,

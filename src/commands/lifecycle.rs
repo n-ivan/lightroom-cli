@@ -9,6 +9,9 @@ use crate::error::{Error, Kind};
 use crate::platform;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
+const LAUNCH_WAIT: Duration = Duration::from_secs(20);
+// An activation sent while Lightroom is still launching can be missed.
+const REACTIVATE_AFTER: Duration = Duration::from_secs(15);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Validates a user-supplied catalog path and returns it canonicalised.
@@ -75,7 +78,12 @@ fn with_started(mut reply: Value, started: bool) -> Value {
     reply
 }
 
-pub async fn start(ctx: &Context, catalog: Option<&Path>, wait: Duration) -> Result<Value, Error> {
+pub async fn start(
+    ctx: &Context,
+    catalog: Option<&Path>,
+    wait: Duration,
+    foreground: bool,
+) -> Result<Value, Error> {
     let catalog = catalog.map(check_catalog).transpose()?;
     if let Some(reply) = hello_if_answering(ctx).await? {
         if let (Some(wanted), Some(open)) = (
@@ -94,16 +102,30 @@ pub async fn start(ctx: &Context, catalog: Option<&Path>, wait: Duration) -> Res
         }
         return Ok(with_started(reply, false));
     }
+    let return_to = (!foreground).then(platform::frontmost_app).flatten();
     if platform::app_is_running()? {
-        platform::activate_app()?;
+        platform::activate_app_for_init(foreground, return_to.as_deref())?;
     } else {
-        platform::launch_app(catalog.as_deref())?;
+        platform::launch_app(catalog.as_deref(), !foreground)?;
+        poll_until(LAUNCH_WAIT, Duration::from_millis(100), || async {
+            platform::app_is_running().ok().filter(|running| *running)
+        })
+        .await;
+        platform::activate_app_for_init(foreground, return_to.as_deref())?;
     }
     let probe = probe_context(ctx);
-    let reply = poll_until(wait, POLL_INTERVAL, || async {
-        hello_if_answering(&probe).await.ok().flatten()
-    })
-    .await;
+    let deadline = Instant::now() + wait;
+    let mut reply = None;
+    while reply.is_none() && Instant::now() < deadline {
+        let chunk = REACTIVATE_AFTER.min(deadline - Instant::now());
+        reply = poll_until(chunk, POLL_INTERVAL, || async {
+            hello_if_answering(&probe).await.ok().flatten()
+        })
+        .await;
+        if reply.is_none() && Instant::now() < deadline {
+            platform::activate_app_for_init(foreground, return_to.as_deref())?;
+        }
+    }
     match reply {
         Some(reply) => Ok(with_started(reply, true)),
         None => Err(Error::new(
@@ -147,10 +169,11 @@ pub async fn restart(
     catalog: Option<&Path>,
     stop_wait: Duration,
     start_wait: Duration,
+    foreground: bool,
 ) -> Result<Value, Error> {
     let catalog = catalog.map(check_catalog).transpose()?;
     stop(ctx, stop_wait).await?;
-    start(ctx, catalog.as_deref(), start_wait).await
+    start(ctx, catalog.as_deref(), start_wait, foreground).await
 }
 
 #[cfg(test)]

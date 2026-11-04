@@ -47,7 +47,9 @@ lrcli status
 ```
 
 The plugin forces Lightroom to initialise it at startup (`LrForceInitPlugin`
-plus a menu item), so no manual Plug-in Manager step is needed. If something
+plus a menu item), so no manual Plug-in Manager step is needed. `lrcli start`
+launches Lightroom in the background; it briefly comes to the front once
+(the plugin can't start otherwise) and focus returns to your app. If something
 goes wrong, open **Library > Plug-in Extras > lrcli Status…** to see the
 plugin's recent log.
 

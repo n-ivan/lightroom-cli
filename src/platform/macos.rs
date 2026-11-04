@@ -32,8 +32,11 @@ pub fn app_is_running() -> Result<bool, Error> {
     Ok(osascript(&format!("application id \"{BUNDLE_ID}\" is running"))? == "true")
 }
 
-pub fn launch_app(catalog: Option<&Path>) -> Result<(), Error> {
+pub fn launch_app(catalog: Option<&Path>, background: bool) -> Result<(), Error> {
     let mut command = Command::new("open");
+    if background {
+        command.arg("-g");
+    }
     command.args(["-b", BUNDLE_ID]);
     command.args(catalog);
     let status = command
@@ -51,6 +54,23 @@ pub fn launch_app(catalog: Option<&Path>) -> Result<(), Error> {
 
 pub fn activate_app() -> Result<(), Error> {
     osascript(&format!("tell application id \"{BUNDLE_ID}\" to activate")).map(drop)
+}
+
+pub fn frontmost_app() -> Option<String> {
+    osascript("tell application \"System Events\" to get bundle identifier of first process whose frontmost is true")
+        .ok()
+        .filter(|id| !id.is_empty() && id != BUNDLE_ID)
+}
+
+// Lightroom only runs plugin init once its window has been activated, even
+// with LrForceInitPlugin; a brief activation is enough, so focus goes back.
+pub fn blip_app(return_to: Option<&str>) -> Result<(), Error> {
+    activate_app()?;
+    if let Some(id) = return_to {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let _ = osascript(&format!("tell application id \"{id}\" to activate"));
+    }
+    Ok(())
 }
 
 pub fn quit_app() -> Result<(), Error> {

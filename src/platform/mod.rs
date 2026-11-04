@@ -42,10 +42,24 @@ pub fn app_is_running() -> Result<bool, Error> {
     }
 }
 
-pub fn launch_app(catalog: Option<&Path>) -> Result<(), Error> {
+pub fn launch_app(catalog: Option<&Path>, background: bool) -> Result<(), Error> {
     match fake_app() {
         Some(_) => Ok(()),
-        None => real_launch_app(catalog),
+        None => real_launch_app(catalog, background),
+    }
+}
+
+pub fn frontmost_app() -> Option<String> {
+    match fake_app() {
+        Some(_) => None,
+        None => real_frontmost_app(),
+    }
+}
+
+pub fn blip_app(return_to: Option<&str>) -> Result<(), Error> {
+    match fake_app() {
+        Some(_) => Ok(()),
+        None => real_blip_app(return_to),
     }
 }
 
@@ -53,6 +67,14 @@ pub fn activate_app() -> Result<(), Error> {
     match fake_app() {
         Some(_) => Ok(()),
         None => real_activate_app(),
+    }
+}
+
+pub fn activate_app_for_init(foreground: bool, return_to: Option<&str>) -> Result<(), Error> {
+    if foreground {
+        activate_app()
+    } else {
+        blip_app(return_to)
     }
 }
 
@@ -66,7 +88,8 @@ pub fn quit_app() -> Result<(), Error> {
 #[cfg(target_os = "macos")]
 use macos::{
     activate_app as real_activate_app, app_is_running as real_app_is_running,
-    launch_app as real_launch_app, quit_app as real_quit_app,
+    blip_app as real_blip_app, frontmost_app as real_frontmost_app, launch_app as real_launch_app,
+    quit_app as real_quit_app,
 };
 
 #[cfg(not(target_os = "macos"))]
@@ -83,7 +106,17 @@ fn real_app_is_running() -> Result<bool, Error> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn real_launch_app(_catalog: Option<&Path>) -> Result<(), Error> {
+fn real_launch_app(_catalog: Option<&Path>, _background: bool) -> Result<(), Error> {
+    Err(unsupported())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn real_frontmost_app() -> Option<String> {
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+fn real_blip_app(_return_to: Option<&str>) -> Result<(), Error> {
     Err(unsupported())
 }
 
