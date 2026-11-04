@@ -69,6 +69,9 @@ function Dispatch:run(id, cmd, args)
     )
   end
   local ok, result = self.protectedCall(handler, args, self)
+  if not ok and type(result) == 'table' and type(result.code) == 'string' then
+    return errorReply(id, result.code, tostring(result.message or result.code))
+  end
   if not ok then
     return errorReply(
       id,

@@ -3,8 +3,9 @@
 Control Adobe Lightroom Classic from the command line, so scripts and AI agents
 can browse a catalog, apply edits, and look at rendered previews of the results.
 
-> **Status:** early development. `lrcli status` and `lrcli plugin install` work;
-> catalog commands are coming.
+> **Status:** early development. `lrcli status`, `lrcli plugin install` and the
+> read-only catalog commands (`search`, `select`, `selection`, `info`) exist;
+> editing commands are coming.
 
 ## How it works
 
@@ -64,6 +65,20 @@ stderr.
 
 State lives in `~/.lrcli` (override with `LRCLI_HOME`): `ports.json` (written by
 the plugin), `plugin.log`, `broker.sock`, `broker.log`, `config.json`.
+
+## Commands
+
+```sh
+lrcli search --rating '>=4' --flag picked --since 2024-01-01   # table of matching photos
+lrcli search --keyword portrait --ids | lrcli select --photos - # ids in, selection out
+lrcli selection                                                # what is selected in Lightroom
+lrcli info --photo 42 --develop                                # metadata, EXIF, develop settings
+```
+
+Photos are identified by the catalog's local id (the `ID` column of `search`).
+`info` and `select` take repeated `--photo <id>`, or `--photos -` to read ids
+from stdin (one per line, or the JSON from `search --json`). `info` without ids
+acts on the current selection. Run `lrcli <command> --help` for all options.
 
 ### Exit codes
 

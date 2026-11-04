@@ -12,6 +12,12 @@ Lightroom.
 
 - `plugin/lrcli.lrdevplugin/`: Lua 5.1 plugin. `json.lua`, `Dispatch.lua` and
   `Version.lua` are pure Lua (no `Lr*` imports) so luajit can test them.
+- `SearchCriteria.lua` (pure): validates search filters and builds the
+  `findPhotos` searchDesc; all SDK criteria names live in one table at its top.
+- `Photos.lua` (pure): builds summary/info objects from already-fetched metadata.
+- `Targets.lua` (pure, catalog injected): resolves explicit ids or the selection.
+- `CatalogHandlers.lua`: the catalog commands (`search`, `select`, `selection`,
+  `info`); the only file that calls the catalog SDK. Merged in by `Handlers.lua`.
 - `plugin/tests/run.lua`: luajit tests, run from the repo root.
 - `src/lib.rs` and its modules are the reusable library (a future MCP server
   should depend on it): `client.rs` (CLI to broker), `broker.rs`,
@@ -23,6 +29,16 @@ Lightroom.
 - `tests/`: integration tests spawn the built binary. `tests/common/mod.rs`
   has the fake plugin (two TCP listeners emulating the LrSocket pair).
 - `local/`: untracked scratch. The spec is `local/spec.md`.
+
+## Lightroom SDK reference
+
+Check every SDK call, metadata key and search criterion against the SDK docs
+before using it; don't rely on memory or other projects. The SDK (Adobe's
+Lightroom Classic SDK download) lives untracked in `local/sdk/`: API reference
+in `API Reference/modules/*.html` (e.g. `LrCatalog.html` for `findPhotos`
+criteria), guide in `Manual/`, examples in `Sample Plugins/`. If it's missing,
+ask the user for it. Anything the docs don't cover (e.g. `getPhotoByLocalId`)
+counts as unsupported unless verified live.
 
 ## Lightroom SDK gotchas (verified on LrC 15.6, macOS)
 
@@ -37,8 +53,14 @@ Lightroom.
 - A send-mode LrSocket never notices its client leaving, and handles a
   half-closed peer badly, so the broker keeps its reply socket's write half
   open.
+- `catalog:getTargetPhotos()` returns the whole filmstrip when nothing is
+  selected; detect "nothing selected" with `catalog:getTargetPhoto() == nil`.
 - Lightroom defers `LrInitPlugin` until the plugin is first used (opening
   Plug-in Manager works); launching or focusing the app is not enough.
+- Lightroom indexes a plugin's `.lua` files at startup: Reload Plug-in picks up
+  edits to existing files, but a newly added file fails with "Could not load
+  toolkit script: <name>" until Lightroom restarts. On any init failure,
+  `Init.lua` logs per-file compile and load errors to find the real cause.
 - A reloaded plugin gets a fresh global environment, so a previous instance
   can't be reached through `_G`. The newest instance wins via
   `instanceStartedAt` in `ports.json`; older instances stop themselves.

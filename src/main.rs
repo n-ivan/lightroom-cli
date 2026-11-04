@@ -4,9 +4,10 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::error::ErrorKind;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 use lrcli::broker;
+use lrcli::commands::photos::{self, Rating, SearchOptions};
 use lrcli::commands::{self, Context};
 use lrcli::error::Error;
 use lrcli::paths::Paths;
@@ -16,6 +17,9 @@ Examples:
   lrcli status                 Check that Lightroom Classic is reachable
   lrcli --json status          Same, as JSON for scripts and agents
   lrcli plugin install         Link the plugin into Lightroom Classic
+  lrcli search --rating '>=4' --flag picked
+                               Find photos in the catalog
+  lrcli info --photo 123       Show a photo's metadata
 
 How it works:
   The lrcli plugin runs inside Lightroom Classic and starts one long-lived
@@ -74,6 +78,107 @@ JSON output:
 Exit 3 means Lightroom Classic or its plugin is not running; exit 4 means the
 plugin rejected this lrcli (version or token mismatch).")]
     Status,
+
+    /// Find photos in the catalog by rating, flag, label, keyword, date and more
+    #[command(after_help = "\
+Filters are combined with AND. With no filters every photo in the catalog
+matches. Results are paged: --limit (default 50, max 500) and --offset.
+
+--rating takes a number from 0 to 5, optionally after an operator:
+  3 (same as ==3), >=3, <=2, >3, <3, !=0
+Quote operators in the shell: --rating '>=3'.
+
+--since and --until are inclusive capture dates (YYYY-MM-DD). --keyword may be
+repeated; a photo must have every keyword. --text searches all searchable
+fields. --filename, --folder and --camera match substrings; --collection
+matches a collection name.
+
+--ids prints only photo ids, one per line, so the output can feed other
+commands.
+
+Examples:
+  lrcli search --rating '>=4' --flag picked
+  lrcli search --keyword portrait --keyword studio --since 2024-01-01
+  lrcli search --camera R5 --limit 100 --offset 100
+  lrcli search --label red --ids | lrcli select --photos -
+  lrcli search --folder 2024-05 --json | lrcli info --photos -
+
+JSON output:
+  {\"ok\":true,\"total\":123,\"offset\":0,\"limit\":50,\"photos\":[
+    {\"id\":42,\"filename\":\"IMG_0001.CR3\",\"path\":\"/photos/IMG_0001.CR3\",
+     \"captureTime\":\"2024-05-31T10:00:00Z\",\"rating\":4,\"flag\":\"picked\",
+     \"label\":\"red\",\"width\":6000,\"height\":4000}]}
+  With --ids: {\"ok\":true,\"ids\":[42],\"total\":123}")]
+    Search(Box<SearchArgs>),
+
+    /// Select photos in Lightroom Classic's Library
+    #[command(after_help = "\
+Replaces Lightroom's current selection with the given photos. Give ids with
+repeated --photo, or pass --photos - to read them from stdin (one id per line,
+or the JSON output of `lrcli search`). If a Library filter or the current
+source hides the photos, the source is switched to All Photographs.
+
+Examples:
+  lrcli select --photo 42 --photo 43
+  lrcli search --rating 5 --ids | lrcli select --photos -
+
+JSON output:
+  {\"ok\":true,\"selected\":[42,43],\"sourceChanged\":false}
+
+Fails with photo_not_found if an id is not in the catalog, and select_failed if
+Lightroom still would not select every photo.")]
+    Select(TargetArgs),
+
+    /// List the photos currently selected in Lightroom Classic
+    #[command(after_help = "\
+Prints the same table as `lrcli search`, or only ids with --ids. An empty
+selection is not an error.
+
+Examples:
+  lrcli selection
+  lrcli selection --ids
+  lrcli --json selection
+
+JSON output:
+  {\"ok\":true,\"photos\":[{\"id\":42,\"filename\":\"IMG_0001.CR3\",...}]}
+  With --ids: {\"ok\":true,\"ids\":[42],\"total\":1}")]
+    Selection {
+        /// Print only photo ids, one per line
+        #[arg(long)]
+        ids: bool,
+    },
+
+    /// Show metadata, EXIF and develop settings for photos
+    #[command(after_help = "\
+Without --photo or --photos, acts on Lightroom's current selection. Ids that
+are not in the catalog fail the whole command (photo_not_found). If nothing is
+selected and no ids are given, it fails with no_photo_selected.
+
+Human output omits develop settings unless --develop is given; --json always
+includes them.
+
+Examples:
+  lrcli info
+  lrcli info --photo 42 --develop
+  lrcli search --flag picked --json | lrcli info --photos -
+  lrcli --json info --photo 42
+
+JSON output:
+  {\"ok\":true,\"target\":\"ids\",\"photos\":[{\"id\":42,\"filename\":\"...\",
+   \"rating\":4,\"flag\":\"picked\",\"label\":null,\"title\":null,\"caption\":null,
+   \"keywords\":[\"a\"],\"fileFormat\":\"RAW\",
+   \"exif\":{\"camera\":\"...\",\"lens\":null,\"iso\":100,\"shutter\":\"1/250 sec\",
+           \"aperture\":\"f/2.8\",\"focalLength\":\"50 mm\",\"exposureBias\":null},
+   \"gps\":null,\"develop\":{...}}]}
+  target is \"selection\" when no ids were given.")]
+    Info {
+        #[command(flatten)]
+        target: TargetArgs,
+
+        /// Include develop settings in human output (always included in JSON)
+        #[arg(long)]
+        develop: bool,
+    },
 
     /// Install, remove, or locate the Lightroom Classic plugin
     #[command(
@@ -150,6 +255,105 @@ JSON output:
     Path,
 }
 
+#[derive(Args)]
+struct SearchArgs {
+    /// Rating filter: N, or an operator and N (==, !=, >, <, >=, <=), 0-5
+    #[arg(long, value_name = "EXPR", value_parser = photos::parse_rating, allow_hyphen_values = true)]
+    rating: Option<Rating>,
+
+    /// Pick flag
+    #[arg(long, value_parser = ["picked", "rejected", "unflagged"])]
+    flag: Option<String>,
+
+    /// Color label
+    #[arg(long, value_parser = ["red", "yellow", "green", "blue", "purple"])]
+    label: Option<String>,
+
+    /// Keyword the photo must have (repeatable)
+    #[arg(long = "keyword", value_name = "KEYWORD")]
+    keywords: Vec<String>,
+
+    /// Match text in any searchable field
+    #[arg(long, value_name = "TEXT")]
+    text: Option<String>,
+
+    /// File name contains
+    #[arg(long, value_name = "TEXT")]
+    filename: Option<String>,
+
+    /// Folder path contains
+    #[arg(long, value_name = "TEXT")]
+    folder: Option<String>,
+
+    /// Collection name
+    #[arg(long, value_name = "NAME")]
+    collection: Option<String>,
+
+    /// Captured on or after this date
+    #[arg(long, value_name = "YYYY-MM-DD", value_parser = photos::parse_date)]
+    since: Option<String>,
+
+    /// Captured on or before this date
+    #[arg(long, value_name = "YYYY-MM-DD", value_parser = photos::parse_date)]
+    until: Option<String>,
+
+    /// Camera model contains
+    #[arg(long, value_name = "TEXT")]
+    camera: Option<String>,
+
+    /// Maximum photos to return
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=500))]
+    limit: Option<u32>,
+
+    /// Number of matching photos to skip
+    #[arg(long, value_name = "N")]
+    offset: Option<u32>,
+
+    /// Print only photo ids, one per line
+    #[arg(long)]
+    ids: bool,
+}
+
+#[derive(Args)]
+struct TargetArgs {
+    /// Photo id (repeatable)
+    #[arg(long = "photo", value_name = "ID")]
+    photo: Vec<i64>,
+
+    /// Read photo ids from stdin: one per line, or JSON from `lrcli search --json`
+    #[arg(long, value_name = "-", value_parser = ["-"], conflicts_with = "photo")]
+    photos: Option<String>,
+}
+
+impl TargetArgs {
+    fn ids(&self) -> Result<Option<Vec<i64>>, Error> {
+        if self.photos.is_some() {
+            return photos::read_stdin_ids().map(Some);
+        }
+        Ok((!self.photo.is_empty()).then(|| self.photo.clone()))
+    }
+}
+
+impl From<SearchArgs> for SearchOptions {
+    fn from(args: SearchArgs) -> Self {
+        Self {
+            rating: args.rating,
+            flag: args.flag,
+            label: args.label,
+            keywords: args.keywords,
+            text: args.text,
+            filename: args.filename,
+            folder: args.folder,
+            collection: args.collection,
+            since: args.since,
+            until: args.until,
+            camera: args.camera,
+            limit: args.limit,
+            offset: args.offset,
+        }
+    }
+}
+
 fn parse_secs(text: &str) -> Result<f64, String> {
     text.parse::<f64>()
         .ok()
@@ -199,6 +403,36 @@ async fn run(cli: Cli, json: bool) -> u8 {
     };
     match cli.command {
         Command::Status => output::emit(commands::status::run(&ctx).await, json, output::status),
+        Command::Search(args) => {
+            let ids = args.ids;
+            let result = commands::photos::search(&ctx, &(*args).into(), ids).await;
+            output::emit(result, json, if ids { output::ids } else { output::search })
+        }
+        Command::Select(target) => {
+            let result = match target.ids() {
+                Ok(Some(ids)) => commands::photos::select(&ctx, &ids).await,
+                Ok(None) => Err(Error::usage(
+                    "Give the photos to select with --photo <id> (repeatable) or --photos - to read ids from stdin.",
+                )),
+                Err(e) => Err(e),
+            };
+            output::emit(result, json, output::select)
+        }
+        Command::Selection { ids } => {
+            let result = commands::photos::selection(&ctx, ids).await;
+            output::emit(
+                result,
+                json,
+                if ids { output::ids } else { output::selection },
+            )
+        }
+        Command::Info { target, develop } => {
+            let result = match target.ids() {
+                Ok(ids) => commands::photos::info(&ctx, ids.as_deref(), develop || json).await,
+                Err(e) => Err(e),
+            };
+            output::emit(result, json, output::info)
+        }
         Command::Raw { cmd, args } => output::emit(
             commands::raw::run(&ctx, &cmd, args.as_deref()).await,
             json,

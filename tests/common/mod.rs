@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -37,6 +38,8 @@ pub struct Stats {
     pub hellos: AtomicUsize,
     pub pings: AtomicUsize,
     pub commands: Mutex<Vec<String>>,
+    pub requests: Mutex<Vec<(String, Value)>>,
+    pub canned: Mutex<HashMap<String, Value>>,
 }
 
 /// Emulates the plugin's LrSocket pair: replies go out on one listener,
@@ -93,6 +96,7 @@ impl FakePlugin {
                 let cmd = request["cmd"].as_str().unwrap().to_string();
                 let args = request["args"].clone();
                 s.commands.lock().unwrap().push(cmd.clone());
+                s.requests.lock().unwrap().push((cmd.clone(), args.clone()));
                 let reply = match cmd.as_str() {
                     "hello" => {
                         s.hellos.fetch_add(1, Ordering::SeqCst);
@@ -125,6 +129,10 @@ impl FakePlugin {
                         continue;
                     }
                     "hang" => continue,
+                    other if s.canned.lock().unwrap().contains_key(other) => {
+                        let body = s.canned.lock().unwrap()[other].clone();
+                        canned_reply(&id, body)
+                    }
                     other => error(
                         &id,
                         "unknown_command",
@@ -164,6 +172,29 @@ impl FakePlugin {
         std::fs::rename(tmp, self.home().join("ports.json")).unwrap();
     }
 
+    /// `body` is an object merged into an ok reply, or `{"error", "message"}` for a failure.
+    pub fn canned(&self, cmd: &str, body: Value) {
+        self.stats
+            .canned
+            .lock()
+            .unwrap()
+            .insert(cmd.to_string(), body);
+    }
+
+    /// Args of the most recent request for `cmd`.
+    pub fn last_args(&self, cmd: &str) -> Value {
+        self.stats
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(c, _)| c == cmd)
+            .unwrap_or_else(|| panic!("plugin never received {cmd}"))
+            .1
+            .clone()
+    }
+
     pub fn close_link(&self) {
         let _ = self.close.send(true);
     }
@@ -174,6 +205,13 @@ impl FakePlugin {
             self.stats.command_conns.load(Ordering::SeqCst),
         )
     }
+}
+
+fn canned_reply(id: &Value, body: Value) -> Value {
+    let mut reply = body;
+    reply["id"] = id.clone();
+    reply["ok"] = json!(reply.get("error").is_none());
+    reply
 }
 
 fn error(id: &Value, code: &str, message: &str) -> Value {
@@ -215,6 +253,28 @@ pub async fn run_env(home: &Path, args: &[&str], env: &[(&str, &Path)]) -> Out {
         command.env(key, value);
     }
     let output = timeout(Duration::from_secs(20), command.output())
+        .await
+        .expect("lrcli hung")
+        .unwrap();
+    Out {
+        code: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+pub async fn run_stdin(home: &Path, args: &[&str], input: &str) -> Out {
+    let mut command = lrcli(home);
+    command
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(input.as_bytes()).await.unwrap();
+    drop(stdin);
+    let output = timeout(Duration::from_secs(20), child.wait_with_output())
         .await
         .expect("lrcli hung")
         .unwrap();

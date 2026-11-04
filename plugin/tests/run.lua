@@ -4,6 +4,9 @@ package.path = pluginDir .. '?.lua;' .. package.path
 local json = require 'json'
 local Dispatch = require 'Dispatch'
 local Version = require 'Version'
+local Photos = require 'Photos'
+local SearchCriteria = require 'SearchCriteria'
+local Targets = require 'Targets'
 
 local passed, failed = 0, 0
 
@@ -241,6 +244,255 @@ test('dispatch rejects missing or invalid id and cmd', function()
   eq(noCmd.id, 3)
   eq(send(d, { id = 3, cmd = 7 }).error, 'bad_request')
   eq(send(d, '{"id":3,"cmd":"echo","args":5}').error, 'bad_request')
+end)
+
+test('dispatch turns structured handler errors into error replies', function()
+  local d = Dispatch.new({
+    token = TOKEN,
+    protocol = 1,
+    handlers = {
+      hello = function()
+        return {}
+      end,
+      missing = function()
+        error({ code = 'photo_not_found', message = 'nope' }, 0)
+      end,
+      odd = function()
+        error({ code = 5 })
+      end,
+    },
+  })
+  hello(d)
+  local reply = send(d, { id = 2, cmd = 'missing' })
+  eq(reply.ok, false)
+  eq(reply.error, 'photo_not_found')
+  eq(reply.message, 'nope')
+  eq(reply.id, 2)
+  eq(send(d, { id = 3, cmd = 'odd' }).error, 'internal_error')
+end)
+
+local function badRequest(fn, ...)
+  local ok, err = pcall(fn, ...)
+  eq(ok, false)
+  eq(type(err), 'table', 'error')
+  return err
+end
+
+local function crit(filters)
+  return SearchCriteria.build(filters)
+end
+
+test('search: no filters means no searchDesc', function()
+  eq(crit(nil), nil)
+  eq(crit({}), nil)
+  eq(crit(json.null), nil)
+end)
+
+test('search: rating', function()
+  local d = crit({ rating = { op = '>=', value = 3 } })
+  eq(d.combine, 'intersect')
+  eq(#d, 1)
+  eq(d[1].criteria, 'rating')
+  eq(d[1].operation, '>=')
+  eq(d[1].value, 3)
+end)
+
+test('search: rating validation', function()
+  eq(badRequest(crit, { rating = { op = '~', value = 3 } }).code, 'bad_request')
+  assert(badRequest(crit, { rating = { op = '==', value = 6 } }).message:find('0 to 5', 1, true))
+  badRequest(crit, { rating = { op = '==', value = 1.5 } })
+  badRequest(crit, { rating = 3 })
+end)
+
+test('search: flag and label map to SDK values', function()
+  eq(crit({ flag = 'picked' })[1].value, 1)
+  eq(crit({ flag = 'unflagged' })[1].value, 0)
+  eq(crit({ flag = 'rejected' })[1].value, -1)
+  eq(crit({ label = 'red' })[1].value, 1)
+  eq(crit({ label = 'purple' })[1].value, 5)
+  local err = badRequest(crit, { flag = 'maybe' })
+  assert(err.message:find('"flag"', 1, true) and err.message:find('picked', 1, true), err.message)
+  assert(badRequest(crit, { label = 'pink' }).message:find('red, yellow, green, blue, purple', 1, true))
+end)
+
+test('search: keywords become one criterion each', function()
+  local d = crit({ keywords = { 'a', 'b' } })
+  eq(#d, 2)
+  eq(d[1].criteria, 'keywords')
+  eq(d[2].value, 'b')
+  badRequest(crit, { keywords = {} })
+  badRequest(crit, { keywords = { '' } })
+  badRequest(crit, { keywords = 'a' })
+end)
+
+test('search: text filters', function()
+  eq(crit({ text = 'x' })[1].criteria, 'all')
+  eq(crit({ filename = 'IMG' })[1].criteria, 'filename')
+  eq(crit({ folder = '2024' })[1].criteria, 'folder')
+  eq(crit({ collection = 'Best' })[1].criteria, 'collection')
+  eq(crit({ camera = 'R5' })[1].criteria, 'camera')
+  assert(badRequest(crit, { text = '' }).message:find('"text"', 1, true))
+  badRequest(crit, { camera = 5 })
+end)
+
+test('search: dates', function()
+  local since = crit({ since = '2024-02-29' })[1]
+  eq(since.criteria, 'captureTime')
+  eq(since.operation, '>')
+  eq(since.value, '2024-02-28')
+  local untilDate = crit({ ['until'] = '2024-12-31' })[1]
+  eq(untilDate.operation, '<')
+  eq(untilDate.value, '2025-01-01')
+  eq(crit({ since = '2024-03-01' })[1].value, '2024-02-29')
+  local both = crit({ since = '2024-01-01', ['until'] = '2024-01-31' })
+  eq(#both, 1)
+  eq(both[1].operation, 'in')
+  eq(both[1].value, '2024-01-01')
+  eq(both[1].value2, '2024-01-31')
+  badRequest(crit, { since = '2023-02-29' })
+  badRequest(crit, { since = '2024-1-1' })
+  badRequest(crit, { since = 20240101 })
+  badRequest(crit, { since = '2024-02-01', ['until'] = '2024-01-01' })
+end)
+
+test('search: combined filters and unknown filters', function()
+  local d = crit({ rating = { op = '==', value = 5 }, flag = 'picked', text = 'x' })
+  eq(#d, 3)
+  eq(d.combine, 'intersect')
+  assert(badRequest(crit, { colour = 'red' }).message:find('Allowed filters', 1, true))
+  badRequest(crit, 'x')
+end)
+
+test('search: paging defaults and limits', function()
+  local limit, offset = SearchCriteria.paging({})
+  eq(limit, 50)
+  eq(offset, 0)
+  limit, offset = SearchCriteria.paging({ limit = 500, offset = 10 })
+  eq(limit, 500)
+  eq(offset, 10)
+  badRequest(SearchCriteria.paging, { limit = 501 })
+  badRequest(SearchCriteria.paging, { limit = 0 })
+  badRequest(SearchCriteria.paging, { offset = -1 })
+  badRequest(SearchCriteria.paging, { offset = 1.5 })
+end)
+
+test('photos: summary maps flags, labels and nulls', function()
+  local s = Photos.summary({
+    id = 7, fileName = 'a.cr3', path = '/p/a.cr3', captureTime = '2024-01-02T03:04:05Z',
+    rating = 4, pickStatus = -1, colorNameForLabel = 'Red', dimensions = { width = 10, height = 20 },
+  })
+  eq(s.id, 7)
+  eq(s.flag, 'rejected')
+  eq(s.label, 'red')
+  eq(s.rating, 4)
+  eq(s.width, 10)
+  eq(s.captureTime, '2024-01-02T03:04:05Z')
+  local bare = Photos.summary({ id = 8, pickStatus = 1, colorNameForLabel = 'Custom' })
+  eq(bare.flag, 'picked')
+  eq(bare.label, json.null)
+  eq(bare.captureTime, json.null)
+  eq(bare.width, json.null)
+  eq(bare.rating, 0)
+  eq(Photos.summary({ id = 9 }).flag, 'unflagged')
+end)
+
+test('photos: info adds metadata, gps and optional develop', function()
+  local meta = {
+    id = 1, title = '', caption = 'c', keywordTags = 'a, b ,,c', fileFormat = 'RAW',
+    cameraModel = 'R5', isoSpeedRating = 100, shutterSpeed = '1/250 sec', gps = { latitude = 1.5, longitude = -2 },
+  }
+  local i = Photos.info(meta)
+  eq(i.title, json.null)
+  eq(i.caption, 'c')
+  eq(#i.keywords, 3)
+  eq(i.keywords[2], 'b')
+  eq(i.exif.camera, 'R5')
+  eq(i.exif.lens, json.null)
+  eq(i.exif.shutter, '1/250 sec')
+  eq(i.gps.longitude, -2)
+  eq(i.develop, nil)
+  eq(Photos.info({ id = 2 }).gps, json.null)
+  eq(json.encode(Photos.info({ id = 2 }).keywords), '[]')
+  eq(Photos.info(meta, { Exposure2012 = 0.5 }).develop.Exposure2012, 0.5)
+end)
+
+test('photos: sanitize drops values json cannot encode', function()
+  local clean = Photos.sanitize({
+    a = 1, b = 'x', c = true, d = print, e = 0 / 0, f = { 1, 2, 3 }, g = { h = { i = 2 } }, [3] = 'stray',
+  })
+  eq(clean.a, 1)
+  eq(clean.d, nil)
+  eq(clean.e, nil)
+  eq(clean.f[3], 3)
+  eq(clean.g.h.i, 2)
+  eq(clean[3], nil)
+  eq(json.encode(Photos.sanitize({ f = { 1, 2 } })), '{"f":[1,2]}')
+  local cyclic = {}
+  cyclic.self = cyclic
+  json.encode(Photos.sanitize(cyclic))
+end)
+
+local function stubCatalog(opts)
+  local photos, all = {}, {}
+  for _, id in ipairs(opts.known or {}) do
+    photos[id] = { localIdentifier = id }
+    all[#all + 1] = photos[id]
+  end
+  local selected = opts.selected or {}
+  return {
+    getAllPhotos = function()
+      return all
+    end,
+    getTargetPhoto = function()
+      return selected[1]
+    end,
+    getTargetPhotos = function()
+      return #selected > 0 and selected or { photos[1], photos[2] }
+    end,
+  }
+end
+
+test('targets: parseIds', function()
+  eq(Targets.parseIds(nil), nil)
+  eq(Targets.parseIds(json.null), nil)
+  eq(#Targets.parseIds({ 1, 2, 2, 3 }), 3)
+  eq(badRequest(Targets.parseIds, { 'a' }).code, 'bad_request')
+  badRequest(Targets.parseIds, { 1.5 })
+  badRequest(Targets.parseIds, 5)
+end)
+
+test('targets: explicit ids resolve all-or-nothing', function()
+  local catalog = stubCatalog({ known = { 1, 2 } })
+  local photos, target = Targets.resolve(catalog, { 2, 1 })
+  eq(#photos, 2)
+  eq(photos[1].localIdentifier, 2)
+  eq(target, 'ids')
+  local err = badRequest(Targets.resolve, catalog, { 1, 8, 9 })
+  eq(err.code, 'photo_not_found')
+  assert(err.message:find('8, 9', 1, true), err.message)
+end)
+
+test('targets: no ids uses the selection', function()
+  local catalog = stubCatalog({ known = { 1, 2 }, selected = { { localIdentifier = 2 } } })
+  local photos, target = Targets.resolve(catalog, nil)
+  eq(#photos, 1)
+  eq(target, 'selection')
+  eq(Targets.resolve(catalog, {}) ~= nil, true)
+end)
+
+test('targets: nothing selected is detected despite getTargetPhotos returning the filmstrip', function()
+  local catalog = stubCatalog({ known = { 1, 2 } })
+  eq(#catalog:getTargetPhotos(), 2)
+  local err = badRequest(Targets.resolve, catalog, nil)
+  eq(err.code, 'no_photo_selected')
+  assert(err.message:find('--photo <id>', 1, true))
+  eq(#Targets.selection(catalog), 0)
+end)
+
+test('targets: sameIds compares as sets', function()
+  eq(Targets.sameIds({ { localIdentifier = 1 }, { localIdentifier = 2 } }, { 2, 1 }), true)
+  eq(Targets.sameIds({ { localIdentifier = 1 } }, { 1, 2 }), false)
+  eq(Targets.sameIds({ { localIdentifier = 3 } }, { 1 }), false)
 end)
 
 test('dispatch replies encode to JSON', function()

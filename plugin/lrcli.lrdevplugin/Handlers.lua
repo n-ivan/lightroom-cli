@@ -1,3 +1,5 @@
+local CatalogHandlers = require 'CatalogHandlers'
+
 local Handlers = {}
 
 function Handlers.new(deps)
@@ -14,6 +16,10 @@ function Handlers.new(deps)
 
   function handlers.ping()
     return {}
+  end
+
+  for name, handler in pairs(CatalogHandlers.new()) do
+    handlers[name] = handler
   end
 
   return handlers
