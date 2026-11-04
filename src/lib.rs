@@ -2,6 +2,7 @@ pub mod broker;
 pub mod client;
 pub mod clock;
 pub mod commands;
+pub mod compare;
 pub mod error;
 pub mod history;
 pub mod log;

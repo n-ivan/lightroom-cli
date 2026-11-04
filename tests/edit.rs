@@ -642,3 +642,147 @@ async fn history_lists_newest_first_without_lightroom() {
         "No recorded changes.\n"
     );
 }
+
+fn write_and_preview_order(plugin: &FakePlugin) -> Vec<String> {
+    plugin
+        .stats
+        .commands
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| matches!(c.as_str(), "preview" | "apply" | "preset"))
+        .cloned()
+        .collect()
+}
+
+fn compare_fixtures(plugin: &FakePlugin) {
+    plugin.canned(
+        "apply",
+        json!({ "photos": [
+            { "id": 149, "filename": "a.cr3", "before": { "Tint": 1 }, "after": { "Tint": 2 } },
+        ]}),
+    );
+    plugin.canned(
+        "preview",
+        json!({ "target": "ids", "mode": "export", "size": 1600, "photos": [
+            { "id": 149, "filename": "a.cr3", "file": "{dir}/lrcli-a.jpg", "error": null },
+        ]}),
+    );
+}
+
+#[tokio::test]
+async fn apply_compare_renders_before_and_after_around_the_write() {
+    let (plugin, _broker) = start_broker(Options::default()).await;
+    compare_fixtures(&plugin);
+    let out = run(
+        plugin.home(),
+        &["--json", "apply", "--photo", "149", "Tint=2", "--compare"],
+    )
+    .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(
+        write_and_preview_order(&plugin),
+        ["preview", "apply", "preview"]
+    );
+    let compare = &out.json()["photos"][0]["compare"];
+    let file = compare["file"].as_str().unwrap();
+    assert!(file.ends_with("lrcli-a-compare.jpg"), "{file}");
+    assert_ne!(compare["before"]["file"], compare["after"]["file"]);
+    let composite = image::open(file).unwrap();
+    assert_eq!((composite.width(), composite.height()), (10 + 8 + 10, 6));
+    assert_eq!(compare["before"]["stats"]["width"], 10);
+    assert!(compare["after"]["stats"]["meanLuminance"].is_number());
+
+    let human = run(
+        plugin.home(),
+        &["apply", "--photo", "149", "Tint=2", "--compare"],
+    )
+    .await;
+    assert!(
+        human.stdout.contains("compare: ") && human.stdout.contains("mean 0.50 → 0.50"),
+        "{}",
+        human.stdout
+    );
+}
+
+#[tokio::test]
+async fn compare_wins_over_preview_when_both_are_given() {
+    let (plugin, _broker) = start_broker(Options::default()).await;
+    compare_fixtures(&plugin);
+    let out = run(
+        plugin.home(),
+        &[
+            "--json",
+            "apply",
+            "--photo",
+            "149",
+            "Tint=2",
+            "--preview",
+            "--compare",
+        ],
+    )
+    .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(requests(&plugin, "preview"), 2);
+    assert!(out.json()["photos"][0]["compare"].is_object());
+}
+
+#[tokio::test]
+async fn preset_compare_renders_around_the_write() {
+    let (plugin, _broker) = start_broker(Options::default()).await;
+    compare_fixtures(&plugin);
+    plugin.canned(
+        "preset",
+        json!({ "preset": { "name": "Vivid", "uuid": "u", "folder": "Color" }, "photos": [
+            { "id": 149, "filename": "a.cr3", "before": { "Tint": 1 }, "after": { "Tint": 2 } },
+        ]}),
+    );
+    let out = run(
+        plugin.home(),
+        &["--json", "preset", "Vivid", "--photo", "149", "--compare"],
+    )
+    .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(
+        write_and_preview_order(&plugin),
+        ["preview", "preset", "preview"]
+    );
+    assert!(out.json()["photos"][0]["compare"]["file"].is_string());
+}
+
+#[tokio::test]
+async fn failed_write_skips_the_after_render() {
+    let (plugin, _broker) = start_broker(Options::default()).await;
+    compare_fixtures(&plugin);
+    plugin.canned(
+        "apply",
+        json!({ "photos": [{ "id": 149, "filename": "a.cr3", "error": "nope" }] }),
+    );
+    let out = run(
+        plugin.home(),
+        &["apply", "--photo", "149", "Tint=2", "--compare"],
+    )
+    .await;
+    assert_eq!(out.code, 1);
+    assert_eq!(write_and_preview_order(&plugin), ["preview", "apply"]);
+}
+
+#[tokio::test]
+async fn compare_failure_after_a_write_is_reported_not_fatal() {
+    let (plugin, _broker) = start_broker(Options::default()).await;
+    compare_fixtures(&plugin);
+    plugin.canned(
+        "preview",
+        json!({ "photos": [{ "id": 149, "filename": "a.cr3", "file": null, "error": "render failed" }] }),
+    );
+    let out = run(
+        plugin.home(),
+        &["--json", "apply", "--photo", "149", "Tint=2", "--compare"],
+    )
+    .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let reply = out.json();
+    assert_eq!(reply["compareError"]["message"], "render failed");
+    assert_eq!(requests(&plugin, "preview"), 1);
+    assert_eq!(history(&plugin).len(), 1);
+}

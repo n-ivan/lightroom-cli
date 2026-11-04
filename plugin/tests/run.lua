@@ -1066,6 +1066,84 @@ test('handlers: undo_native does nothing when LrUndo has nothing to undo', funct
   eq(#calls, 0)
 end)
 
+local PanelSettings = require 'PanelSettings'
+
+local testPanels = {
+  { id = 'adjustPanel', title = 'Basic', keys = { 'Temperature', 'Tint', 'Exposure2012', 'IncrementalTemperature', 'Gone' } },
+  { id = 'colorGradingPanel', title = 'Color Grading', keys = { 'ColorGradeBlending' } },
+  { id = 'mixerPanel', title = 'Color Mixer (HSL / B&W)', keys = { 'HueAdjustmentRed' } },
+  { id = 'crop', title = 'Crop', keys = { 'CropLeft' } },
+}
+local testRanges = {
+  raw = {
+    Temperature = { 2000, 50000 }, Tint = { -150, 150 }, Exposure2012 = { -5, 5 },
+    ColorGradeBlending = { 0, 100 }, HueAdjustmentRed = { -100, 100 }, CropLeft = { 0, 1 },
+  },
+  nonRaw = {
+    Temperature = { -100, 100 }, Tint = { -100, 100 }, Exposure2012 = { -5, 5 },
+    IncrementalTemperature = { -100, 100 }, ColorGradeBlending = { 0, 100 },
+    HueAdjustmentRed = { -100, 100 }, CropLeft = { 0, 1 },
+  },
+}
+
+local function keyNames(panel)
+  local names = {}
+  for i, entry in ipairs(panel.keys) do
+    names[i] = entry.key
+  end
+  return table.concat(names, ',')
+end
+
+test('settings: findPanel matches id, title and unique prefixes case-insensitively', function()
+  eq(PanelSettings.findPanel(testPanels, 'basic').id, 'adjustPanel')
+  eq(PanelSettings.findPanel(testPanels, 'CROP').id, 'crop')
+  eq(PanelSettings.findPanel(testPanels, 'colorGradingPanel').id, 'colorGradingPanel')
+  eq(PanelSettings.findPanel(testPanels, 'color g').id, 'colorGradingPanel')
+  eq(PanelSettings.findPanel(testPanels, 'color m').id, 'mixerPanel')
+end)
+
+test('settings: findPanel reports ambiguous and unknown panels with the choices', function()
+  local panel, message = PanelSettings.findPanel(testPanels, 'color')
+  eq(panel, nil)
+  assert(message:find('ambiguous', 1, true) and message:find('mixerPanel', 1, true), message)
+  panel, message = PanelSettings.findPanel(testPanels, 'zzz')
+  eq(panel, nil)
+  assert(message:find('Unknown panel "zzz"', 1, true) and message:find('adjustPanel (Basic)', 1, true), message)
+end)
+
+test('settings: without a photo, raw ranges come with differing non-raw ranges', function()
+  local out = PanelSettings.listing(testPanels, testRanges, nil, nil)
+  eq(keyNames(out[1]), 'Temperature,Tint,Exposure2012,IncrementalTemperature')
+  local temperature, exposure, incremental = out[1].keys[1], out[1].keys[3], out[1].keys[4]
+  eq(temperature.min, 2000)
+  eq(temperature.nonRaw.min, -100)
+  eq(exposure.nonRaw, nil)
+  eq(incremental.nonRawOnly, true)
+  eq(incremental.min, -100)
+  eq(temperature.value, nil)
+end)
+
+test('settings: raw photos drop the Incremental keys and show current values', function()
+  local out = PanelSettings.listing(testPanels, testRanges, 'raw', { Temperature = 5500, Exposure2012 = 0.5, Tint = 'x' })
+  eq(keyNames(out[1]), 'Temperature,Tint,Exposure2012')
+  eq(out[1].keys[1].value, 5500)
+  eq(out[1].keys[1].max, 50000)
+  eq(out[1].keys[2].value, nil)
+  eq(out[1].keys[3].value, 0.5)
+end)
+
+test('settings: non-raw photos swap Temperature/Tint for the Incremental keys', function()
+  local out = PanelSettings.listing(testPanels, testRanges, 'nonRaw', { IncrementalTemperature = 10 })
+  eq(keyNames(out[1]), 'Exposure2012,IncrementalTemperature')
+  eq(out[1].keys[2].value, 10)
+end)
+
+test('settings: panels without applicable keys are dropped and arrays encode as arrays', function()
+  local out = PanelSettings.listing({ testPanels[1] }, { raw = {}, nonRaw = {} }, nil, nil)
+  eq(#out, 0)
+  eq(json.encode(out), '[]')
+end)
+
 test('Version matches Info.lua', function()
   local info = dofile(pluginDir .. 'Info.lua')
   local v = info.VERSION

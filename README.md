@@ -84,8 +84,11 @@ lrcli search --rating '>=4' --flag picked --since 2024-01-01   # table of matchi
 lrcli search --keyword portrait --ids | lrcli select --photos - # ids in, selection out
 lrcli selection                                                # what is selected in Lightroom
 lrcli info --photo 42 --develop                                # metadata, EXIF, develop settings
+lrcli settings --panel basic --photo 42                        # develop setting names by panel, with ranges and current values
 lrcli preview --photo 42 --size 1200                           # JPEG preview with current edits, plus stats
 lrcli apply --photo 42 Exposure2012+=0.5 Contrast2012=15 --preview  # edit develop settings, then render a preview
+lrcli apply --photo 42 Exposure2012+=0.5 --compare             # before/after image (left = before, right = after) plus stats
+lrcli compare before.jpg after.jpg [--out PATH]                # side-by-side JPEG of two images, plus stats
 lrcli presets                                                  # develop presets by folder
 lrcli preset "Warm Contrast" --amount 60 --photo 42            # apply a develop preset
 lrcli tag add "Places > Paris" portrait --photo 42             # add keywords (tag remove to remove)
@@ -112,6 +115,14 @@ Editing commands (`apply`, `preset`, `tag`, `rate`, `flag`, `label`) take the sa
 all its photos in one step, which shows up in Lightroom's Edit > Undo menu, and
 records the replaced values in `~/.lrcli/history.jsonl` so `lrcli undo` can
 restore them (for the catalog that is open).
+
+`settings` lists the develop setting names `apply` accepts, grouped by panel,
+with valid ranges (for a given `--photo`: that photo's ranges and current
+values; non-raw files use `IncrementalTemperature`/`IncrementalTint` instead of
+`Temperature`/`Tint`). `--compare` on `apply` and `preset` renders a preview
+before and after the write and saves a side-by-side image per photo (left =
+before, right = after) next to the after preview, with mean luminance and
+clipping before and after. `compare` does the same for two existing JPEGs.
 
 ### Exit codes
 

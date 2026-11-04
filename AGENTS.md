@@ -28,7 +28,14 @@ Lightroom.
   never edit it. Regenerate: run `lrcli raw develop_ranges '{"photos":[<id>]}'`
   on a raw photo and on a non-raw one (e.g. TIFF), save the JSON replies to
   `scripts/data/develop-ranges-raw.json` / `develop-ranges-nonraw.json`, then run
-  `scripts/gen-develop-ranges.py`.
+  `scripts/gen-develop-ranges.py` and `scripts/gen-develop-panels.py`. It probes
+  documented keys plus the photo's own keys; pass `"names": [...]` for keys a
+  photo only has in some states (e.g. `GrayMixer*` on black-and-white photos,
+  `LensBlur*`), or they get no range and drop out of `settings`.
+- `DevelopPanels.lua`: GENERATED panel-to-keys list for `settings`; never edit
+  it, run `scripts/gen-develop-panels.py` (reads the untracked SDK docs and the
+  key/range data above). `PanelSettings.lua` (pure): panel lookup and the
+  raw/non-raw range listing; the `settings` handler is in `CatalogHandlers.lua`.
 - `Preview.lua` (pure): `preview` arg validation, export settings table, result
   assembly.
 - `PreviewHandler.lua`: the `preview` command (export session or cached
@@ -40,7 +47,8 @@ Lightroom.
   should depend on it): `client.rs` (CLI to broker), `broker.rs`,
   `plugin_link.rs` (broker to plugin, id multiplexing), `protocol.rs`,
   `paths.rs`, `error.rs`, `log.rs`, `commands/`, `platform/` (OS-specific
-  paths, app launch/quit; `LRCLI_FAKE_APP=running|stopped` fakes them in tests), `stats.rs` (JPEG luminance and clipping stats; no printing).
+  paths, app launch/quit; `LRCLI_FAKE_APP=running|stopped` fakes them in tests), `stats.rs` (JPEG luminance and clipping stats; no printing), `compare.rs`
+  (side-by-side before/after JPEG; used by `compare` and `--compare`).
 - `src/main.rs` (clap, exit mapping) and `src/output.rs` (human/JSON printing)
   are the only places that print or exit.
 - `tests/`: integration tests spawn the built binary. `tests/common/mod.rs`

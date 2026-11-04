@@ -18,7 +18,7 @@ local CONTROLLER_ONLY = {
   'PresetAmount', 'ProfileAmount', 'straightenAngle',
 }
 
-local function probeNames(photo)
+local function probeNames(photo, extra)
   local names, seen = {}, {}
   local function add(name)
     if not seen[name] then
@@ -39,6 +39,11 @@ local function probeNames(photo)
   for _, name in ipairs(CONTROLLER_ONLY) do
     add(name)
   end
+  for _, name in ipairs(type(extra) == 'table' and extra or {}) do
+    if type(name) == 'string' then
+      add(name)
+    end
+  end
   table.sort(names)
   return names
 end
@@ -56,7 +61,7 @@ function DevHandlers.new()
     LrApplicationView.switchToModule('develop')
     LrTasks.sleep(1)
     local ranges, failed = {}, json.array({})
-    for _, name in ipairs(probeNames(photo)) do
+    for _, name in ipairs(probeNames(photo, args.names)) do
       local ok, min, max = LrTasks.pcall(LrDevelopController.getRange, name)
       if ok and type(min) == 'number' and type(max) == 'number' then
         ranges[name] = json.array({ min, max })

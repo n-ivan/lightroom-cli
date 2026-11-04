@@ -1,9 +1,11 @@
+use std::path::Path;
 use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
 use super::preview::{self, PreviewOptions};
 use super::{Context, status};
+use crate::compare;
 use crate::error::Error;
 use crate::history::{self, Recorded};
 use crate::settings::{self, Setting};
@@ -14,6 +16,7 @@ const REQUESTED_TOLERANCE: f64 = 0.005;
 pub struct Run<'a> {
     pub command_line: &'a str,
     pub preview: bool,
+    pub compare: bool,
     /// The user's `--timeout`, if any; otherwise previews get a batch-sized default.
     pub timeout: Option<Duration>,
 }
@@ -137,32 +140,131 @@ pub fn differs_from_requested(after: &Value, requested: &Value) -> bool {
     }
 }
 
-async fn attach_preview(ctx: &Context, run: &Run<'_>, reply: &mut Value) {
-    let ids: Vec<i64> = photos_of(reply)
+fn error_json(e: &Error) -> Value {
+    json!({ "error": e.code, "message": e.message })
+}
+
+fn succeeded_ids(reply: &Value) -> Vec<i64> {
+    photos_of(reply)
         .iter()
         .filter(|p| p.get("error").is_none())
         .filter_map(|p| p.get("id").and_then(Value::as_i64))
-        .collect();
-    if ids.is_empty() {
-        return;
-    }
+        .collect()
+}
+
+async fn render(
+    ctx: &Context,
+    run: &Run<'_>,
+    ids: Option<Vec<i64>>,
+    stats: bool,
+) -> Result<Value, Error> {
     let preview_ctx = Context {
         paths: ctx.paths.clone(),
         timeout: run
             .timeout
-            .unwrap_or_else(|| preview::default_timeout(Some(&ids))),
+            .unwrap_or_else(|| preview::default_timeout(ids.as_deref())),
         connect_timeout: ctx.connect_timeout,
     };
     let options = PreviewOptions {
-        ids: Some(ids),
+        ids,
         size: preview::DEFAULT_SIZE,
         fast: false,
         histogram: false,
-        stats: true,
+        stats,
     };
-    match preview::run(&preview_ctx, &options).await {
+    preview::run(&preview_ctx, &options).await
+}
+
+async fn attach_preview(ctx: &Context, run: &Run<'_>, reply: &mut Value) {
+    let ids = succeeded_ids(reply);
+    if ids.is_empty() {
+        return;
+    }
+    match render(ctx, run, Some(ids), true).await {
         Ok(result) => reply["preview"] = result,
-        Err(e) => reply["previewError"] = json!({ "error": e.code, "message": e.message }),
+        Err(e) => reply["previewError"] = error_json(&e),
+    }
+}
+
+fn preview_file<'a>(preview: &'a Value, id: &Value) -> Option<&'a str> {
+    photos_of(preview)
+        .iter()
+        .find(|p| p["id"] == *id)?
+        .get("file")?
+        .as_str()
+}
+
+async fn render_before(
+    ctx: &Context,
+    run: &Run<'_>,
+    ids: Option<&[i64]>,
+) -> Option<Result<Value, Error>> {
+    if !run.compare {
+        return None;
+    }
+    Some(render(ctx, run, ids.map(<[i64]>::to_vec), false).await)
+}
+
+/// Renders the after previews and composes each photo's before/after image.
+/// Problems are reported in the reply; the write has already happened.
+async fn attach_compare(
+    ctx: &Context,
+    run: &Run<'_>,
+    reply: &mut Value,
+    before: Result<Value, Error>,
+) {
+    let before = match before {
+        Ok(before) => before,
+        Err(e) => {
+            reply["compareError"] = error_json(&e);
+            return;
+        }
+    };
+    let ids = succeeded_ids(reply);
+    if ids.is_empty() {
+        return;
+    }
+    let after = match render(ctx, run, Some(ids), false).await {
+        Ok(after) => after,
+        Err(e) => {
+            reply["compareError"] = error_json(&e);
+            return;
+        }
+    };
+    let Some(photos) = reply.get_mut("photos").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for photo in photos.iter_mut().filter(|p| p.get("error").is_none()) {
+        let id = photo["id"].clone();
+        let Some((before_file, after_file)) =
+            preview_file(&before, &id).zip(preview_file(&after, &id))
+        else {
+            photo["compareError"] =
+                json!("Lightroom produced no before/after preview of this photo.");
+            continue;
+        };
+        let after_path = Path::new(after_file);
+        match compare::compare_files(
+            Path::new(before_file),
+            after_path,
+            &compare::default_output(after_path),
+        ) {
+            Ok(result) => photo["compare"] = result,
+            Err(e) => photo["compareError"] = json!(e.message),
+        }
+    }
+}
+
+async fn attach_previews(
+    ctx: &Context,
+    run: &Run<'_>,
+    reply: &mut Value,
+    before: Option<Result<Value, Error>>,
+) {
+    if let Some(before) = before {
+        attach_compare(ctx, run, reply, before).await;
+    } else if run.preview {
+        attach_preview(ctx, run, reply).await;
     }
 }
 
@@ -205,11 +307,10 @@ pub async fn apply(
     let mut args = targets(ids);
     args.insert("set".into(), Value::Object(set));
     args.insert("add".into(), Value::Object(add));
+    let before = render_before(ctx, run, ids).await;
     let mut reply = write(ctx, run, "apply", args, develop_changes).await?;
     annotate_requested(&mut reply, settings);
-    if run.preview {
-        attach_preview(ctx, run, &mut reply).await;
-    }
+    attach_previews(ctx, run, &mut reply, before).await;
     Ok(reply)
 }
 
@@ -244,10 +345,9 @@ pub async fn preset(
     if let Some(amount) = amount {
         args.insert("amount".into(), json!(amount));
     }
+    let before = render_before(ctx, run, ids).await;
     let mut reply = write(ctx, run, "preset", args, develop_changes).await?;
-    if run.preview {
-        attach_preview(ctx, run, &mut reply).await;
-    }
+    attach_previews(ctx, run, &mut reply, before).await;
     Ok(reply)
 }
 

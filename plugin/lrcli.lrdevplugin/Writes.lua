@@ -73,7 +73,7 @@ local function checkKey(key, keyTypes)
     local close = Writes.suggest(key, keyTypes)
     local hint = #close > 0 and (' Did you mean: ' .. table.concat(close, ', ') .. '?') or ''
     badRequest('Unknown develop setting "' .. key .. '".' .. hint
-      .. ' Run `lrcli info --develop` to see the setting names Lightroom uses.')
+      .. ' Run `lrcli settings` to list setting names and ranges.')
   end
   if kind == 'table' then
     badRequest(key .. ' is a structured setting and cannot be set from the command line.')

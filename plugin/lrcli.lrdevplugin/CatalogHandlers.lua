@@ -1,7 +1,11 @@
+local DevelopPanels = require 'DevelopPanels'
+local DevelopRanges = require 'DevelopRanges'
 local json = require 'json'
+local PanelSettings = require 'PanelSettings'
 local Photos = require 'Photos'
 local SearchCriteria = require 'SearchCriteria'
 local Targets = require 'Targets'
+local Writes = require 'Writes'
 
 local LrApplication = import 'LrApplication'
 local LrTasks = import 'LrTasks'
@@ -68,6 +72,25 @@ local function selectPhotos(catalog, photos)
   catalog:setSelectedPhotos(photos[1], rest)
 end
 
+local function badRequest(message)
+  error({ code = 'bad_request', message = message }, 0)
+end
+
+local function settingsPhoto(catalog, args)
+  local ids = Targets.parseIds(args.photos)
+  if ids and #ids > 1 then
+    badRequest('"photos" must list at most one photo for settings.')
+  end
+  if not ids and args.useSelection ~= true then
+    return nil
+  end
+  local photos = Targets.resolve(catalog, ids)
+  if #photos > 1 then
+    badRequest('Select a single photo (or pass --photo <id>) to show its settings.')
+  end
+  return photos[1]
+end
+
 function CatalogHandlers.new()
   local handlers = {}
 
@@ -132,6 +155,35 @@ function CatalogHandlers.new()
       list[i] = Photos.info(meta, args.develop == true and photos[i]:getDevelopSettings() or nil)
     end
     return { target = target, photos = list }
+  end
+
+  function handlers.settings(args)
+    local panels = DevelopPanels
+    if args.panel ~= nil and args.panel ~= json.null then
+      if type(args.panel) ~= 'string' then
+        badRequest('"panel" must be a string.')
+      end
+      local panel, message = PanelSettings.findPanel(DevelopPanels, args.panel)
+      if not panel then
+        badRequest(message)
+      end
+      panels = { panel }
+    end
+    local photo = settingsPhoto(LrApplication.activeCatalog(), args)
+    if not photo then
+      return { panels = PanelSettings.listing(panels, DevelopRanges, nil, nil), fileType = json.null }
+    end
+    if photo:getRawMetadata('isVideo') then
+      badRequest('Videos have no develop settings.')
+    end
+    local fileType = Writes.rangesFor(DevelopRanges, photo:getRawMetadata('fileFormat')) == DevelopRanges.raw
+        and 'raw'
+      or 'nonRaw'
+    return {
+      photo = photo.localIdentifier,
+      panels = PanelSettings.listing(panels, DevelopRanges, fileType, photo:getDevelopSettings()),
+      fileType = fileType,
+    }
   end
 
   return handlers

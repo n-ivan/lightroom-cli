@@ -95,7 +95,13 @@ fn create_dir(path: &Path) -> Result<(), Error> {
 
 fn create_batch_dir(previews: &Path) -> Result<(String, PathBuf), Error> {
     create_dir(previews)?;
-    let name = batch_name(clock::now_secs(), std::process::id());
+    // A later batch within the same second (compare renders twice) must not
+    // overwrite the earlier one's files.
+    let now = clock::now_secs();
+    let name = (0..)
+        .map(|offset| batch_name(now + offset, std::process::id()))
+        .find(|name| !previews.join(name).exists())
+        .expect("an unused batch name exists");
     let dir = previews.join(&name);
     create_dir(&dir)?;
     let dir = std::path::absolute(&dir)

@@ -365,20 +365,59 @@ fn preview_line(photo: &Value) -> String {
     };
     let mut line = format!("{name} ({id})  {file}");
     if let Some(stats) = photo.get("stats") {
-        let dimension = |key| stats.get(key).and_then(Value::as_u64);
-        if let Some((width, height)) = dimension("width").zip(dimension("height")) {
-            line.push_str(&format!("  {width}×{height}"));
-        }
-        if let Some(mean) = stats.get("meanLuminance").and_then(Value::as_f64) {
-            line.push_str(&format!("  mean {mean:.2}"));
-        }
-        if let Some((high, low)) =
-            max_percent(stats, "highlights").zip(max_percent(stats, "shadows"))
-        {
-            line.push_str(&format!("  clip hi {high:.1}% lo {low:.1}%"));
-        }
+        line.push_str(&stats_summary(stats));
     }
     line
+}
+
+fn stats_summary(stats: &Value) -> String {
+    let mut text = String::new();
+    let dimension = |key| stats.get(key).and_then(Value::as_u64);
+    if let Some((width, height)) = dimension("width").zip(dimension("height")) {
+        text.push_str(&format!("  {width}×{height}"));
+    }
+    if let Some(mean) = stats.get("meanLuminance").and_then(Value::as_f64) {
+        text.push_str(&format!("  mean {mean:.2}"));
+    }
+    if let Some((high, low)) = max_percent(stats, "highlights").zip(max_percent(stats, "shadows")) {
+        text.push_str(&format!("  clip hi {high:.1}% lo {low:.1}%"));
+    }
+    text
+}
+
+fn before_after_line(compare: &Value) -> String {
+    let (before, after) = (&compare["before"]["stats"], &compare["after"]["stats"]);
+    let mut parts = Vec::new();
+    let mean = |stats: &Value| stats.get("meanLuminance").and_then(Value::as_f64);
+    if let Some((b, a)) = mean(before).zip(mean(after)) {
+        parts.push(format!("mean {b:.2} → {a:.2}"));
+    }
+    let clip = |stats: &Value, kind| max_percent(stats, kind);
+    if let Some((b, a)) = clip(before, "highlights").zip(clip(after, "highlights")) {
+        parts.push(format!("clip hi {b:.1}% → {a:.1}%"));
+    }
+    if let Some((b, a)) = clip(before, "shadows").zip(clip(after, "shadows")) {
+        parts.push(format!("lo {b:.1}% → {a:.1}%"));
+    }
+    parts.join(", ")
+}
+
+pub fn compare(value: &Value) -> String {
+    let side = |name: &str| {
+        let side = &value[name];
+        format!(
+            "  {name:<6} {}{}",
+            str_at(side, "file").unwrap_or("?"),
+            stats_summary(&side["stats"])
+        )
+    };
+    format!(
+        "{}\n{}\n{}\n  {}",
+        str_at(value, "file").unwrap_or("?"),
+        side("before"),
+        side("after"),
+        before_after_line(value)
+    )
 }
 
 pub fn preview(value: &Value) -> String {
@@ -443,6 +482,16 @@ fn develop_block(photo: &Value) -> String {
     if lines.len() == 1 {
         lines.push("  (no changes)".to_string());
     }
+    if let Some(compare) = photo.get("compare") {
+        lines.push(format!(
+            "  compare: {}",
+            str_at(compare, "file").unwrap_or("?")
+        ));
+        lines.push(format!("    {}", before_after_line(compare)));
+    }
+    if let Some(message) = str_at(photo, "compareError") {
+        lines.push(format!("  compare failed: {message}"));
+    }
     lines.join("\n")
 }
 
@@ -456,6 +505,12 @@ fn write_footer(value: &Value, lines: &mut Vec<String>) {
         .and_then(Value::as_str)
     {
         lines.push(format!("preview failed: {message}"));
+    }
+    if let Some(message) = value
+        .pointer("/compareError/message")
+        .and_then(Value::as_str)
+    {
+        lines.push(format!("compare failed: {message}"));
     }
     if let Some(message) = str_at(value, "historyWarning") {
         lines.push(format!("warning: {message}"));
@@ -672,6 +727,61 @@ pub fn history(value: &Value) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn range_text(entry: &Value) -> String {
+    format!(
+        "{}..{}",
+        display_value(&entry["min"]),
+        display_value(&entry["max"])
+    )
+}
+
+pub fn settings(value: &Value) -> String {
+    let panels = value["panels"].as_array().map_or(&[][..], Vec::as_slice);
+    let keys_of = |panel: &Value| panel["keys"].as_array().cloned().unwrap_or_default();
+    let key_width = panels
+        .iter()
+        .flat_map(keys_of)
+        .map(|k| str_at(&k, "key").map_or(1, |key| key.chars().count()))
+        .max()
+        .unwrap_or(0);
+    let range_width = panels
+        .iter()
+        .flat_map(keys_of)
+        .map(|k| range_text(&k).chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut blocks = Vec::new();
+    if let Some(photo) = value.get("photo") {
+        let kind = if value["fileType"] == "raw" {
+            "raw"
+        } else {
+            "non-raw"
+        };
+        blocks.push(format!("Photo {photo} ({kind} file)"));
+    }
+    for panel in panels {
+        let mut lines = vec![str_at(panel, "title").unwrap_or("?").to_string()];
+        for key in keys_of(panel) {
+            let mut line = format!(
+                "  {:<key_width$}  {:<range_width$}",
+                str_at(&key, "key").unwrap_or("?"),
+                range_text(&key)
+            );
+            if let Some(current) = key.get("value") {
+                line.push_str(&format!("  [{}]", display_value(current)));
+            }
+            if key["nonRawOnly"] == true {
+                line.push_str("  (non-raw only)");
+            } else if let Some(non_raw) = key.get("nonRaw") {
+                line.push_str(&format!("  (non-raw {})", range_text(non_raw)));
+            }
+            lines.push(line.trim_end().to_string());
+        }
+        blocks.push(lines.join("\n"));
+    }
+    blocks.join("\n\n")
 }
 
 pub fn raw(value: &Value) -> String {

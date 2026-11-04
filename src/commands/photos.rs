@@ -251,6 +251,28 @@ pub async fn info(ctx: &Context, photos: Option<&[i64]>, develop: bool) -> Resul
         .await
 }
 
+pub fn settings_args(photo: Option<i64>, panel: Option<&str>) -> Value {
+    let mut args = Map::new();
+    if let Some(photo) = photo {
+        args.insert("photos".into(), json!([photo]));
+    }
+    if let Some(panel) = panel {
+        args.insert("panel".into(), json!(panel));
+    }
+    Value::Object(args)
+}
+
+pub async fn settings(
+    ctx: &Context,
+    photo: Option<i64>,
+    panel: Option<&str>,
+) -> Result<Value, Error> {
+    ctx.connect()
+        .await?
+        .request("settings", settings_args(photo, panel))
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

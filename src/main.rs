@@ -7,11 +7,14 @@ use std::time::Duration;
 use clap::error::ErrorKind;
 use clap::{Args, Parser, Subcommand};
 
+use serde_json::json;
+
 use lrcli::broker;
 use lrcli::commands::edit::{self, Run};
 use lrcli::commands::photos::{self, Rating, SearchOptions};
 use lrcli::commands::preview::{self, PreviewOptions};
 use lrcli::commands::{self, Context};
+use lrcli::compare;
 use lrcli::error::Error;
 use lrcli::history::command_line;
 use lrcli::paths::Paths;
@@ -269,6 +272,73 @@ JSON output:
         develop: bool,
     },
 
+    /// List develop setting names by panel with their valid ranges
+    #[command(after_help = "\
+Prints the develop settings `lrcli apply` accepts, grouped by Lightroom panel
+(Basic, Tone Curve, Color Mixer, Color Grading, Detail, Effects, Lens
+Corrections, Calibration, Crop), each with its valid range. Crop edges are
+fractions (0 to 1) of the original frame.
+
+Without --photo the ranges are for raw files, and a `non-raw` range is shown
+where non-raw files differ. Temperature/Tint only apply to raw files; non-raw
+files (JPEG, TIFF, PNG...) use IncrementalTemperature/IncrementalTint instead.
+With --photo the ranges are those of that photo's file type, the keys that do
+not apply to it are left out, and each setting shows its current value in
+brackets. --panel limits the output to one panel, given by id or title
+(case-insensitive, a unique prefix is enough).
+
+Examples:
+  lrcli settings
+  lrcli settings --panel basic
+  lrcli settings --panel color --photo 149
+  lrcli --json settings --panel crop
+
+JSON output:
+  {\"ok\":true,\"fileType\":\"raw\",\"photo\":149,\"panels\":[{\"id\":\"adjustPanel\",
+    \"title\":\"Basic\",\"keys\":[{\"key\":\"Exposure2012\",\"min\":-5,\"max\":5,\"value\":0.5}]}]}
+  fileType is null without --photo; then \"value\" is absent, a key's
+  \"nonRaw\":{\"min\",\"max\"} appears where non-raw files differ, and
+  \"nonRawOnly\":true marks keys that exist only for non-raw files.")]
+    Settings {
+        /// Only this panel (id or title, case-insensitive)
+        #[arg(long, value_name = "NAME")]
+        panel: Option<String>,
+
+        /// Show ranges for this photo's file type and its current values
+        #[arg(long, value_name = "ID")]
+        photo: Option<i64>,
+    },
+
+    /// Compose a before/after image from two JPEG files
+    #[command(after_help = "\
+Scales both images to the same height (the smaller of the two, at most 1600
+px) and writes them side by side as one JPEG, with BEFORE on the left and
+AFTER on the right. Prints the output path and, for each input, its size, mean
+luminance and clipping (see `lrcli preview --help`). Does not need Lightroom.
+Without --out the file is written next to AFTER as <after-stem>-compare.jpg.
+
+Examples:
+  lrcli compare before.jpg after.jpg
+  lrcli --json compare before.jpg after.jpg --out /tmp/side-by-side.jpg
+
+JSON output:
+  {\"ok\":true,\"file\":\"/tmp/side-by-side.jpg\",
+   \"before\":{\"file\":\"before.jpg\",\"stats\":{...}},
+   \"after\":{\"file\":\"after.jpg\",\"stats\":{...}}}")]
+    Compare {
+        /// The image shown on the left
+        #[arg(value_name = "BEFORE")]
+        before: PathBuf,
+
+        /// The image shown on the right
+        #[arg(value_name = "AFTER")]
+        after: PathBuf,
+
+        /// Where to write the composite (default: next to AFTER)
+        #[arg(long, value_name = "PATH")]
+        out: Option<PathBuf>,
+    },
+
     /// Render JPEG previews of photos (with current edits) and report their stats
     #[command(after_help = "\
 Renders each photo to a JPEG you can open or view directly, so you can judge
@@ -324,19 +394,24 @@ on Lightroom's current selection. Each SETTING is one of:
 Keys are Lightroom's develop setting names, for example Exposure2012,
 Contrast2012, Highlights2012, Shadows2012, Whites2012, Blacks2012, Texture,
 Clarity2012, Dehaze, Vibrance, Saturation, Temperature, Tint, WhiteBalance.
-Run `lrcli info --develop` to see the names and current values. Unknown names
-are refused with close matches. Relative changes are computed by lrcli from the
+Run `lrcli settings` to list the names by panel with their valid ranges (add
+--photo ID for current values), or `lrcli info --develop` for every key a photo
+holds. Unknown names are refused with close matches. Relative changes are computed by lrcli from the
 current value; Lightroom may clamp the result, and the output flags any value
 that differs from what was requested.
 
 All photos are written in one step that shows as \"lrcli apply\" in Lightroom's
 Edit > Undo menu. Videos are reported per photo and skipped. If every photo
 fails the command exits 1. --preview then renders a preview of the edited
-photos (like `lrcli preview`). Every successful edit is recorded for `lrcli undo`.
+photos (like `lrcli preview`). --compare renders a preview before and after the
+write and saves one image per photo with the before on the left and the after on
+the right, plus mean luminance and clipping before and after (it takes the place
+of --preview). Every successful edit is recorded for `lrcli undo`.
 
 Examples:
   lrcli apply --photo 149 Exposure2012+=0.5 Contrast2012=15 WhiteBalance=Auto
   lrcli apply Highlights2012-=20 Shadows2012+=30 --preview
+  lrcli apply --photo 149 Exposure2012+=0.5 --compare
   lrcli search --rating 5 --ids | lrcli apply --photos - Vibrance=25
 
 JSON output:
@@ -344,7 +419,10 @@ JSON output:
     \"before\":{\"Exposure2012\":0.0},\"after\":{\"Exposure2012\":0.5},
     \"requested\":{\"Exposure2012\":0.5}}]}
   A photo that failed has \"error\" instead. With --preview the preview reply is
-  under \"preview\" (or \"previewError\").")]
+  under \"preview\" (or \"previewError\"). With --compare each photo has
+  \"compare\":{\"file\":COMPOSITE,\"before\":{\"file\":...,\"stats\":{...}},
+  \"after\":{...}} (or \"compareError\"); a failed render is a top-level
+  \"compareError\":{\"error\",\"message\"}. The write is never failed by --compare.")]
     Apply(Box<ApplyArgs>),
 
     /// List the develop presets available in Lightroom
@@ -368,11 +446,14 @@ the choices listed as Folder/Name (uuid). --amount is the preset strength, 0 to
 200 (100 is the preset as designed). Without --photo or --photos, acts on
 Lightroom's current selection. The output lists, per photo, the settings the
 preset changed. Shows as \"lrcli preset <name>\" in Lightroom's Edit > Undo menu,
-and is recorded for `lrcli undo`.
+and is recorded for `lrcli undo`. --compare saves a before/after image per
+photo (left = before, right = after) with luminance and clipping stats, as
+described in `lrcli apply --help`.
 
 Examples:
   lrcli preset Vivid --photo 149
   lrcli preset \"Warm Contrast\" --amount 60 --preview
+  lrcli preset Vivid --photo 149 --compare
   lrcli preset 1C2D3E4F-0123-4567-89AB-CDEF01234567 --photos -
 
 JSON output:
@@ -621,6 +702,10 @@ struct ApplyArgs {
     /// After writing, render a preview of the edited photos
     #[arg(long)]
     preview: bool,
+
+    /// Render before and after previews and save a side-by-side image (left = before, right = after)
+    #[arg(long)]
+    compare: bool,
 }
 
 #[derive(Args)]
@@ -639,6 +724,10 @@ struct PresetArgs {
     /// After writing, render a preview of the edited photos
     #[arg(long)]
     preview: bool,
+
+    /// Render before and after previews and save a side-by-side image (left = before, right = after)
+    #[arg(long)]
+    compare: bool,
 }
 
 #[derive(Args)]
@@ -815,10 +904,11 @@ fn parse_secs(text: &str) -> Result<f64, String> {
         .ok_or_else(|| "must be a positive number of seconds".to_string())
 }
 
-fn write_run(command_line: &str, preview: bool, timeout: Option<f64>) -> Run<'_> {
+fn write_run(command_line: &str, preview: bool, compare: bool, timeout: Option<f64>) -> Run<'_> {
     Run {
         command_line,
         preview,
+        compare,
         timeout: timeout.map(Duration::from_secs_f64),
     }
 }
@@ -924,6 +1014,19 @@ async fn run(cli: Cli, json: bool) -> u8 {
             };
             output::emit(result, json, output::info)
         }
+        Command::Settings { panel, photo } => output::emit(
+            commands::photos::settings(&ctx, photo, panel.as_deref()).await,
+            json,
+            output::settings,
+        ),
+        Command::Compare { before, after, out } => {
+            let out = out.unwrap_or_else(|| compare::default_output(&after));
+            let result = compare::compare_files(&before, &after, &out).map(|mut reply| {
+                reply["ok"] = json!(true);
+                reply
+            });
+            output::emit(result, json, output::compare)
+        }
         Command::Preview(args) => {
             let result = match args.target.ids() {
                 Ok(ids) => {
@@ -945,7 +1048,7 @@ async fn run(cli: Cli, json: bool) -> u8 {
             output::emit(result, json, output::preview)
         }
         Command::Apply(args) => {
-            let run = write_run(&command_line, args.preview, cli.timeout);
+            let run = write_run(&command_line, args.preview, args.compare, cli.timeout);
             let result = match args.target.ids() {
                 Ok(ids) => edit::apply(&ctx, &run, ids.as_deref(), &args.settings).await,
                 Err(e) => Err(e),
@@ -954,7 +1057,7 @@ async fn run(cli: Cli, json: bool) -> u8 {
         }
         Command::Presets => output::emit(edit::presets(&ctx).await, json, output::presets),
         Command::Preset(args) => {
-            let run = write_run(&command_line, args.preview, cli.timeout);
+            let run = write_run(&command_line, args.preview, args.compare, cli.timeout);
             let result = match args.target.ids() {
                 Ok(ids) => {
                     edit::preset(&ctx, &run, ids.as_deref(), &args.preset, args.amount).await
@@ -964,7 +1067,7 @@ async fn run(cli: Cli, json: bool) -> u8 {
             output::emit(result, json, output::preset)
         }
         Command::Tag(tag) => {
-            let run = write_run(&command_line, false, cli.timeout);
+            let run = write_run(&command_line, false, false, cli.timeout);
             let (target, add, remove) = match tag {
                 TagCommand::Add { keywords, target } => (target, keywords, Vec::new()),
                 TagCommand::Remove { keywords, target } => (target, Vec::new(), keywords),
@@ -976,7 +1079,7 @@ async fn run(cli: Cli, json: bool) -> u8 {
             output::emit(result, json, output::tag)
         }
         Command::Rate(args) => {
-            let run = write_run(&command_line, false, cli.timeout);
+            let run = write_run(&command_line, false, false, cli.timeout);
             let result = match args.target.ids() {
                 Ok(ids) => edit::rate(&ctx, &run, ids.as_deref(), args.rating).await,
                 Err(e) => Err(e),
@@ -984,7 +1087,7 @@ async fn run(cli: Cli, json: bool) -> u8 {
             output::emit(result, json, output::scalar)
         }
         Command::Flag(args) => {
-            let run = write_run(&command_line, false, cli.timeout);
+            let run = write_run(&command_line, false, false, cli.timeout);
             let result = match args.target.ids() {
                 Ok(ids) => edit::flag(&ctx, &run, ids.as_deref(), &args.flag).await,
                 Err(e) => Err(e),
@@ -992,7 +1095,7 @@ async fn run(cli: Cli, json: bool) -> u8 {
             output::emit(result, json, output::scalar)
         }
         Command::Label(args) => {
-            let run = write_run(&command_line, false, cli.timeout);
+            let run = write_run(&command_line, false, false, cli.timeout);
             let result = match args.target.ids() {
                 Ok(ids) => edit::label(&ctx, &run, ids.as_deref(), &args.label).await,
                 Err(e) => Err(e),
