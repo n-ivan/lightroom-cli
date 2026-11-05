@@ -20,6 +20,7 @@ pub const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 pub struct Options {
     pub token: String,
     pub protocol: i64,
+    pub plugin_version: String,
 }
 
 impl Default for Options {
@@ -27,6 +28,7 @@ impl Default for Options {
         Self {
             token: TOKEN.into(),
             protocol: 1,
+            plugin_version: "0.1.0".into(),
         }
     }
 }
@@ -108,7 +110,7 @@ impl FakePlugin {
                             authenticated = true;
                             json!({
                                 "id": id, "ok": true, "protocol": options.protocol,
-                                "plugin": { "version": "0.1.0" },
+                                "plugin": { "version": options.plugin_version },
                                 "lightroom": { "version": "15.0 [fake]" },
                                 "catalog": { "path": "/fake/catalog.lrcat" },
                             })

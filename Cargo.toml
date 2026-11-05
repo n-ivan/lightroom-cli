@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Control Adobe Lightroom Classic from the command line"
 license = "MIT"
+repository = "https://github.com/n-ivan/lightroom-cli"
 publish = false
 
 [lib]

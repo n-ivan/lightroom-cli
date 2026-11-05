@@ -182,7 +182,7 @@ async fn broker_for_a_new_session_replaces_the_old_one() {
     let new_token = "abcdefabcdefabcdefabcdefabcdefab";
     let new_plugin = FakePlugin::start(Options {
         token: new_token.into(),
-        protocol: 1,
+        ..Options::default()
     })
     .await;
     std::fs::copy(

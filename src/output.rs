@@ -1,6 +1,7 @@
 use serde_json::Value;
 
 use lrcli::commands::edit::{conflict_line, differs_from_requested};
+use lrcli::commands::status;
 use lrcli::diagnostics::{self, Diagnostics};
 use lrcli::error::{Error, Kind};
 use lrcli::paths::Paths;
@@ -78,7 +79,7 @@ fn number(value: &Value, pointer: &str) -> String {
 }
 
 pub fn status(value: &Value) -> String {
-    format!(
+    let mut out = format!(
         "Lightroom Classic {}\nPlugin:  {} (protocol {})\nCatalog: {}\nBroker:  {} (pid {})",
         text(value, "/lightroom/version"),
         text(value, "/plugin/version"),
@@ -86,7 +87,14 @@ pub fn status(value: &Value) -> String {
         text(value, "/catalog/path"),
         text(value, "/broker/version"),
         number(value, "/broker/pid"),
-    )
+    );
+    if value["versionMismatch"] == true {
+        out.push_str(&format!(
+            "\nWarning: {}",
+            status::mismatch_warning(text(value, "/plugin/version"))
+        ));
+    }
+    out
 }
 
 pub fn start(value: &Value) -> String {
@@ -107,41 +115,69 @@ pub fn stop(value: &Value) -> String {
 }
 
 pub fn plugin_install(value: &Value) -> String {
-    let (source, target) = (text(value, "/source"), text(value, "/target"));
-    match text(value, "/action") {
-        "unchanged" => format!(
-            "Already installed: {target} -> {source}\nBroker path: {}",
+    let target = text(value, "/target");
+    let mut lines = match (text(value, "/mode"), text(value, "/action")) {
+        ("dev", "unchanged") => vec![format!(
+            "Already installed (dev): {target} -> {}",
+            text(value, "/source")
+        )],
+        ("dev", action) => vec![format!(
+            "{} {target} -> {} (dev)\nBroker path: {}",
+            installed_verb(action),
+            text(value, "/source"),
             text(value, "/brokerPath")
-        ),
-        action => {
-            let verb = if action == "replaced" {
-                "Replaced"
-            } else {
-                "Installed"
-            };
-            format!(
-                "{verb} {target} -> {source}\nBroker path: {}\n{RESTART_HINT}",
-                text(value, "/brokerPath")
-            )
-        }
+        )],
+        (_, action) => vec![format!(
+            "{} {target}\nBroker: {}",
+            installed_verb(action),
+            text(value, "/brokerPath")
+        )],
+    };
+    if let Some(removed) = value["removed"].as_str() {
+        lines.push(format!(
+            "Removed {removed} (it uses the same plugin id as this install)."
+        ));
+    }
+    if text(value, "/action") != "unchanged" {
+        lines.push(RESTART_HINT.to_string());
+    }
+    lines.join("\n")
+}
+
+fn installed_verb(action: &str) -> &'static str {
+    match action {
+        "upgraded" => "Upgraded",
+        "replaced" => "Replaced",
+        _ => "Installed",
     }
 }
 
 pub fn plugin_uninstall(value: &Value) -> String {
-    let target = text(value, "/target");
-    match text(value, "/action") {
-        "removed" => format!("Removed {target}\nRestart Lightroom Classic to unload the plugin."),
-        _ => format!("Not installed: nothing at {target}"),
+    let removed: Vec<&str> = value["removed"]
+        .as_array()
+        .map(|paths| paths.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if removed.is_empty() {
+        return "Not installed: nothing to remove.".to_string();
     }
+    let mut lines: Vec<String> = removed
+        .iter()
+        .map(|path| format!("Removed {path}"))
+        .collect();
+    lines.push("Restart Lightroom Classic to unload the plugin.".to_string());
+    lines.join("\n")
 }
 
 pub fn plugin_path(value: &Value) -> String {
-    format!(
-        "Source: {}\nTarget: {}\nConfig: {}",
-        text(value, "/source"),
-        text(value, "/target"),
-        text(value, "/config")
-    )
+    let broker = value["brokerPath"].as_str().unwrap_or("unknown");
+    match text(value, "/installed") {
+        "none" => "Not installed. Run `lrcli plugin install`.".to_string(),
+        mode => format!(
+            "Installed: {mode}\nPlugin:    {}\nBroker:    {broker}\nConfig:    {}",
+            text(value, "/target"),
+            text(value, "/config")
+        ),
+    }
 }
 
 fn str_at<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
@@ -918,12 +954,19 @@ mod tests {
 
     #[test]
     fn install_output_mentions_restart_only_when_something_changed() {
-        let installed =
-            json!({ "action": "installed", "source": "/s", "target": "/t", "brokerPath": "/b" });
+        let installed = json!({ "mode": "dev", "action": "installed", "source": "/s", "target": "/t", "brokerPath": "/b" });
         assert!(plugin_install(&installed).contains("lrcli restart"));
-        let unchanged =
-            json!({ "action": "unchanged", "source": "/s", "target": "/t", "brokerPath": "/b" });
+        let unchanged = json!({ "mode": "dev", "action": "unchanged", "source": "/s", "target": "/t", "brokerPath": "/b" });
         assert!(!plugin_install(&unchanged).contains("Restart"));
+    }
+
+    #[test]
+    fn status_shows_a_version_mismatch() {
+        let reply = json!({ "plugin": { "version": "9.9.9" }, "versionMismatch": true });
+        let text = status(&reply);
+        assert!(text.contains("talks to plugin 9.9.9"), "{text}");
+        assert!(text.contains("lrcli plugin install && lrcli restart"));
+        assert!(!status(&json!({ "plugin": { "version": "0.1.0" } })).contains("Warning"));
     }
 
     fn sample_photo() -> Value {

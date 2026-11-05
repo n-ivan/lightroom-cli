@@ -28,23 +28,38 @@ it). Its window can be hidden.
 
 - macOS (Windows support is planned)
 - Adobe Lightroom Classic
-- Rust (edition 2024 toolchain) to build from source
 
-## Install from source
+## Install
 
 ```sh
-cargo build --release
-cargo install --path .     # or put target/release/lrcli on your PATH
-lrcli plugin install
+curl -fsSL https://raw.githubusercontent.com/n-ivan/lightroom-cli/main/install.sh | sh
 ```
 
-Then start (or restart) Lightroom Classic so it loads the plugin, and check the
-connection:
+This downloads the latest release, verifies its checksum, installs `lrcli` to
+`~/.local/bin` and runs `lrcli plugin install`, which writes the plugin (it is
+embedded in the binary) and a copy of the binary into Lightroom's Modules
+directory. It never uses sudo. Then start (or restart) Lightroom Classic so it
+loads the plugin, and check the connection:
 
 ```sh
 lrcli restart
 lrcli status
 ```
+
+- Upgrade: run the same command again. If the CLI and the installed plugin ever
+  differ in version, every command warns on stderr.
+- Pin a version or location: `LRCLI_VERSION=0.1.0` and `LRCLI_INSTALL_DIR=...`
+  (also `LRCLI_DOWNLOAD_BASE` to use a mirror).
+- Uninstall: `lrcli plugin uninstall`, then `rm ~/.local/bin/lrcli`. State in
+  `~/.lrcli` can be deleted too.
+- From source (Rust, edition 2024 toolchain):
+  `cargo install --git https://github.com/n-ivan/lightroom-cli`, then
+  `lrcli plugin install`.
+- Development: in a checkout, `cargo build` and `target/debug/lrcli plugin
+  install --dev` symlinks `plugin/lrcli.lrdevplugin` into Lightroom's Modules
+  directory and records the binary's path in `~/.lrcli/config.json`, so plugin
+  edits apply without reinstalling. A normal `plugin install` replaces the dev
+  link (and vice versa), since both use the same plugin id.
 
 The plugin forces Lightroom to initialise it at startup (`LrForceInitPlugin`
 plus a menu item), so no manual Plug-in Manager step is needed. `lrcli start`
@@ -52,10 +67,6 @@ launches Lightroom in the background; it briefly comes to the front once
 (the plugin can't start otherwise) and focus returns to your app. If something
 goes wrong, open **File > Plug-in Extras > lrcli Status…** to see the
 plugin's recent log.
-
-`plugin install` symlinks `plugin/lrcli.lrdevplugin` into Lightroom's Modules
-directory and records this binary's path in `~/.lrcli/config.json` so the
-plugin can start the broker. Run it again if you move the binary.
 
 ## Usage
 
@@ -159,6 +170,7 @@ clipping before and after. `compare` does the same for two existing JPEGs.
 ```sh
 make check    # cargo fmt --check, clippy -D warnings, cargo test, Lua syntax + tests
 make build    # release build
+make release  # universal macOS tarball in dist/ (needs both rustup darwin targets)
 ```
 
 `make check` needs `luajit` for the plugin's syntax check and tests.

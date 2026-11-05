@@ -169,19 +169,64 @@ impl Env {
         .await
     }
 
-    fn target(&self) -> std::path::PathBuf {
+    fn dev(&self) -> std::path::PathBuf {
         self.modules.path().join("lrcli.lrdevplugin")
+    }
+
+    fn release(&self) -> std::path::PathBuf {
+        self.modules.path().join("lrcli.lrplugin")
     }
 }
 
 #[tokio::test]
-async fn plugin_install_links_the_plugin_and_writes_config() {
+async fn plugin_install_copies_the_plugin_and_the_binary() {
     let env = Env::new();
     let out = env.run(&["plugin", "install"]).await;
     assert_eq!(out.code, 0, "{}", out.stderr);
     assert!(out.stdout.contains("lrcli restart"));
 
-    let link = fs::read_link(env.target()).unwrap();
+    let target = env.release();
+    assert!(fs::symlink_metadata(&target).unwrap().is_dir());
+    assert!(target.join("Info.lua").is_file());
+    let broker = target.join("bin/lrcli");
+    assert_eq!(
+        fs::read(&broker).unwrap(),
+        fs::read(env!("CARGO_BIN_EXE_lrcli")).unwrap()
+    );
+    assert!(!env.home.path().join("config.json").exists());
+
+    let out = env.run(&["--json", "plugin", "install"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let body = out.json();
+    assert_eq!(
+        (body["mode"].as_str(), body["action"].as_str()),
+        (Some("release"), Some("upgraded"))
+    );
+    assert_eq!(body["brokerPath"], broker.to_str().unwrap());
+}
+
+#[tokio::test]
+async fn plugin_install_refuses_a_foreign_lrplugin_unless_forced() {
+    let env = Env::new();
+    fs::create_dir(env.release()).unwrap();
+    let out = env.run(&["--json", "plugin", "install"]).await;
+    assert_eq!(out.code, 1);
+    assert_eq!(out.json()["error"], "plugin_target_exists");
+    assert!(!env.release().join("bin").exists());
+
+    let out = env.run(&["plugin", "install", "--force"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(env.release().join("bin/lrcli").exists());
+}
+
+#[tokio::test]
+async fn dev_install_links_the_plugin_and_writes_config() {
+    let env = Env::new();
+    let out = env.run(&["plugin", "install", "--dev"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(out.stdout.contains("lrcli restart"));
+
+    let link = fs::read_link(env.dev()).unwrap();
     assert!(link.ends_with("plugin/lrcli.lrdevplugin"), "{link:?}");
     assert!(link.join("Info.lua").exists());
 
@@ -190,72 +235,75 @@ async fn plugin_install_links_the_plugin_and_writes_config() {
     assert_eq!(config["version"], 1);
     let broker_path = fs::canonicalize(env!("CARGO_BIN_EXE_lrcli")).unwrap();
     assert_eq!(config["brokerPath"], broker_path.to_str().unwrap());
-}
 
-#[tokio::test]
-async fn plugin_install_twice_is_a_no_op() {
-    let env = Env::new();
-    env.run(&["plugin", "install"]).await;
-    let out = env.run(&["--json", "plugin", "install"]).await;
-    assert_eq!(out.code, 0);
+    let out = env.run(&["--json", "plugin", "install", "--dev"]).await;
     assert_eq!(out.json()["action"], "unchanged");
 }
 
 #[tokio::test]
-async fn plugin_install_refuses_a_foreign_target_unless_forced() {
+async fn switching_between_dev_and_release_removes_the_other_copy() {
     let env = Env::new();
-    fs::create_dir(env.target()).unwrap();
-    let out = env.run(&["--json", "plugin", "install"]).await;
-    assert_eq!(out.code, 1);
-    assert_eq!(out.json()["error"], "plugin_target_exists");
-    assert!(!env.home.path().join("config.json").exists());
-
-    let out = env.run(&["--json", "plugin", "install", "--force"]).await;
+    env.run(&["plugin", "install", "--dev"]).await;
+    let out = env.run(&["plugin", "install"]).await;
     assert_eq!(out.code, 0, "{}", out.stderr);
-    assert_eq!(out.json()["action"], "replaced");
-    assert!(fs::symlink_metadata(env.target()).unwrap().is_symlink());
+    assert!(out.stdout.contains("Removed"), "{}", out.stdout);
+    assert!(fs::symlink_metadata(env.dev()).is_err());
+    assert!(env.release().is_dir());
+
+    let out = env.run(&["--json", "plugin", "install", "--dev"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.json()["removed"], env.release().to_str().unwrap());
+    assert!(!env.release().exists());
+    assert!(fs::symlink_metadata(env.dev()).unwrap().is_symlink());
 }
 
 #[tokio::test]
-async fn plugin_uninstall_removes_the_link_and_config_only() {
+async fn plugin_uninstall_removes_ours_and_config_only() {
     let env = Env::new();
-    env.run(&["plugin", "install"]).await;
+    env.run(&["plugin", "install", "--dev"]).await;
     let out = env.run(&["--json", "plugin", "uninstall"]).await;
     assert_eq!(out.code, 0);
-    assert_eq!(out.json()["action"], "removed");
-    assert!(fs::symlink_metadata(env.target()).is_err());
+    assert_eq!(out.json()["removed"], serde_json::json!([env.dev()]));
+    assert!(fs::symlink_metadata(env.dev()).is_err());
     assert!(!env.home.path().join("config.json").exists());
 
-    let out = env.run(&["--json", "plugin", "uninstall"]).await;
-    assert_eq!(out.json()["action"], "absent");
+    env.run(&["plugin", "install"]).await;
+    let out = env.run(&["plugin", "uninstall"]).await;
+    assert_eq!(out.code, 0);
+    assert!(!env.release().exists());
 
-    fs::create_dir(env.target()).unwrap();
+    let out = env.run(&["--json", "plugin", "uninstall"]).await;
+    assert_eq!(out.json()["removed"], serde_json::json!([]));
+
+    fs::create_dir(env.dev()).unwrap();
     let out = env.run(&["--json", "plugin", "uninstall"]).await;
     assert_eq!(out.code, 1);
-    assert!(env.target().is_dir());
+    assert!(env.dev().is_dir());
 }
 
 #[tokio::test]
-async fn plugin_path_prints_source_target_and_config() {
+async fn plugin_path_reports_the_install_and_its_broker() {
     let env = Env::new();
-    let out = env.run(&["--json", "plugin", "path"]).await;
-    assert_eq!(out.code, 0, "{}", out.stderr);
-    let body = out.json();
-    assert!(
-        body["source"]
-            .as_str()
-            .unwrap()
-            .ends_with("plugin/lrcli.lrdevplugin")
-    );
-    assert_eq!(body["target"], env.target().to_str().unwrap());
+    let body = env.run(&["--json", "plugin", "path"]).await.json();
+    assert_eq!(body["installed"], "none");
+    assert!(body["brokerPath"].is_null());
+    let out = env.run(&["plugin", "path"]).await;
+    assert!(out.stdout.contains("Not installed"), "{}", out.stdout);
+
+    env.run(&["plugin", "install"]).await;
+    let body = env.run(&["--json", "plugin", "path"]).await.json();
+    assert_eq!(body["installed"], "release");
+    assert_eq!(body["target"], env.release().to_str().unwrap());
     assert_eq!(
-        body["config"],
-        env.home.path().join("config.json").to_str().unwrap()
+        body["brokerPath"],
+        env.release().join("bin/lrcli").to_str().unwrap()
     );
     let out = env.run(&["plugin", "path"]).await;
-    assert!(
-        out.stdout.contains("Source: ")
-            && out.stdout.contains("Target: ")
-            && out.stdout.contains("Config: ")
-    );
+    assert!(out.stdout.contains("Installed: release") && out.stdout.contains("Broker:"));
+
+    env.run(&["plugin", "install", "--dev"]).await;
+    let body = env.run(&["--json", "plugin", "path"]).await.json();
+    assert_eq!(body["installed"], "dev");
+    let broker = fs::canonicalize(env!("CARGO_BIN_EXE_lrcli")).unwrap();
+    assert_eq!(body["brokerPath"], broker.to_str().unwrap());
 }

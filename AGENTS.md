@@ -55,6 +55,14 @@ Lightroom.
   `paths.rs`, `error.rs`, `log.rs`, `commands/`, `platform/` (OS-specific
   paths, app launch/quit; `LRCLI_FAKE_APP=running|stopped` fakes them in tests), `stats.rs` (JPEG luminance and clipping stats; no printing), `compare.rs`
   (side-by-side before/after JPEG; used by `compare` and `--compare`).
+- `build.rs` embeds `plugin/lrcli.lrdevplugin/` into the binary
+  (`src/plugin_files.rs`); `lrcli plugin install` writes it out, so the binary
+  never needs the checkout.
+- `scripts/bump-version.sh` (versions), `scripts/build-release.sh` (universal
+  macOS tarball in `dist/`, needs both rustup darwin targets; `make release`),
+  `install.sh` (the curl installer; `tests/install_script.rs` runs it against a
+  `file://` release), `.github/workflows/` (`ci.yml`: `make check`;
+  `release.yml`: on `v*` tags builds and publishes the release).
 - `src/main.rs` (clap, exit mapping) and `src/output.rs` (human/JSON printing)
   are the only places that print or exit.
 - `tests/`: integration tests spawn the built binary. `tests/common/mod.rs`
@@ -157,6 +165,20 @@ counts as unsupported unless verified live.
 `make check` = `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
 `cargo test`, then Lua syntax checks and `plugin/tests/run.lua`. Requires
 `luajit`. `make build` makes the release binary.
+
+## Plugin install flavours and releases
+
+- Release install: `lrcli plugin install` writes `lrcli.lrplugin/` (embedded
+  plugin plus a copy of the binary in `bin/lrcli`); `Broker.lua` prefers that
+  binary, so broker and plugin versions always match. Dev install:
+  `lrcli plugin install --dev` symlinks `lrcli.lrdevplugin` and records the
+  binary in `~/.lrcli/config.json`. Each install removes the other (same
+  toolkit id would conflict).
+- Every broker-using command compares the plugin's hello version with the CLI's
+  and warns on stderr on mismatch (`status` also reports `versionMismatch`).
+- Cutting a release: `scripts/bump-version.sh X.Y.Z`, `make check`, commit,
+  `git tag vX.Y.Z`, push the commit and the tag. The workflow checks that the
+  tag equals the Cargo version and publishes the tarball and `.sha256`.
 
 ## Conventions
 

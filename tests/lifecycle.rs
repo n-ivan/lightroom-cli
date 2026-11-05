@@ -96,3 +96,34 @@ async fn lifecycle_commands_document_themselves() {
         assert!(out.stdout.contains("Examples:"), "{cmd}");
     }
 }
+
+#[tokio::test]
+async fn version_mismatch_warns_on_stderr_for_every_command_and_flags_status() {
+    let (plugin, _broker) = start_broker(Options {
+        plugin_version: "9.9.9".into(),
+        ..Options::default()
+    })
+    .await;
+    let warning = "lrcli 0.1.0 talks to plugin 9.9.9; run `lrcli plugin install && lrcli restart`";
+
+    let out = run(plugin.home(), &["status"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(out.stderr.contains(warning), "{}", out.stderr);
+    assert!(out.stdout.contains("Warning:"), "{}", out.stdout);
+
+    let out = run(plugin.home(), &["--json", "status"]).await;
+    assert!(out.stderr.contains(warning), "{}", out.stderr);
+    assert_eq!(out.json()["versionMismatch"], true);
+
+    let out = run(plugin.home(), &["--json", "selection"]).await;
+    assert!(out.stderr.contains(warning), "{}", out.stderr);
+    assert!(!out.stdout.contains("talks to plugin"));
+}
+
+#[tokio::test]
+async fn matching_versions_print_no_warning() {
+    let (plugin, _broker) = start_broker(Options::default()).await;
+    let out = run(plugin.home(), &["--json", "status"]).await;
+    assert!(out.stderr.is_empty(), "{}", out.stderr);
+    assert!(out.json().get("versionMismatch").is_none());
+}

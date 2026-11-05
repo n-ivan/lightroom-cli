@@ -28,7 +28,7 @@ const ABOUT_EXAMPLES: &str = "\
 Examples:
   lrcli status                 Check that Lightroom Classic is reachable
   lrcli --json status          Same, as JSON for scripts and agents
-  lrcli plugin install         Link the plugin into Lightroom Classic
+  lrcli plugin install         Install the plugin into Lightroom Classic
   lrcli start                  Launch Lightroom Classic and wait for the plugin
   lrcli restart                Quit and relaunch Lightroom Classic
   lrcli search --rating '>=4' --flag picked
@@ -700,56 +700,68 @@ JSON output:
 
 #[derive(Subcommand)]
 enum PluginCommand {
-    /// Symlink the plugin into Lightroom Classic's Modules directory
+    /// Install the plugin and this binary into Lightroom Classic
     #[command(after_help = "\
-Links plugin/lrcli.lrdevplugin into
-~/Library/Application Support/Adobe/Lightroom/Modules and writes
-~/.lrcli/config.json, which tells the plugin where this lrcli binary lives so
-it can start the broker. Run it again after moving the lrcli binary.
+Writes the plugin (embedded in this binary) to
+~/Library/Application Support/Adobe/Lightroom/Modules/lrcli.lrplugin and copies
+this binary to lrcli.lrplugin/bin/lrcli, which is what the plugin starts as its
+broker. Running it again upgrades in place. A lrcli.lrplugin that is not the
+lrcli plugin is refused unless --force is given.
 
-An existing correct link is left alone. Anything else at the target is
-refused unless --force is given.
+With --dev, instead symlinks plugin/lrcli.lrdevplugin from a source checkout
+as lrcli.lrdevplugin and records this binary's path in ~/.lrcli/config.json,
+so plugin edits apply without reinstalling. Installing one flavour removes the
+other, because both use the same Lightroom toolkit id.
 
 After installing, run `lrcli restart` (or `lrcli start` if Lightroom Classic is
 not running) so Lightroom loads the plugin.
 
 Examples:
   lrcli plugin install
-  lrcli plugin install --force
+  lrcli plugin install --dev
   lrcli --json plugin install
 
 JSON output:
-  {\"ok\":true,\"action\":\"installed\",\"source\":\"...\",\"target\":\"...\",
-   \"config\":\"...\",\"brokerPath\":\"...\"}
-  action is one of installed, replaced, unchanged.")]
+  {\"ok\":true,\"mode\":\"release\",\"action\":\"installed\",\"target\":\"...\",
+   \"brokerPath\":\"...\",\"removed\":null}
+  mode is release or dev (dev adds source and config). action is installed,
+  upgraded, replaced or unchanged. removed is the other flavour's path when
+  one was removed.")]
     Install {
         /// Replace whatever is already at the target
         #[arg(long)]
         force: bool,
+        /// Symlink the source checkout's plugin instead of installing a copy
+        #[arg(long)]
+        dev: bool,
     },
 
-    /// Remove the plugin symlink and config.json
+    /// Remove the installed plugin (either flavour) and config.json
     #[command(after_help = "\
-Removes only the symlink that lrcli created (never a real directory) and
-~/.lrcli/config.json. Restart Lightroom Classic to unload the plugin.
+Removes lrcli.lrplugin and the lrcli.lrdevplugin symlink, whichever of them
+exist and are the lrcli plugin (never anything else), and
+~/.lrcli/config.json. Restart Lightroom Classic to unload the plugin. The lrcli
+binary itself is not removed.
 
 Examples:
   lrcli plugin uninstall
   lrcli --json plugin uninstall
 
 JSON output:
-  {\"ok\":true,\"action\":\"removed\",\"target\":\"...\",\"config\":\"...\"}
-  action is removed or absent.")]
+  {\"ok\":true,\"removed\":[\"...\"],\"config\":\"...\"}
+  removed is empty when nothing was installed.")]
     Uninstall,
 
-    /// Print where the plugin source, install target and config live
+    /// Show which plugin install exists and the broker binary it runs
     #[command(after_help = "\
 Examples:
   lrcli plugin path
   lrcli --json plugin path
 
 JSON output:
-  {\"ok\":true,\"source\":\"...\",\"target\":\"...\",\"config\":\"...\"}")]
+  {\"ok\":true,\"installed\":\"release\",\"target\":\"...\",\"brokerPath\":\"...\",
+   \"config\":\"...\"}
+  installed is release, dev or none; target and brokerPath are null when unknown.")]
     Path,
 }
 
@@ -1349,6 +1361,27 @@ async fn main() -> ExitCode {
     ExitCode::from(run(cli, json).await)
 }
 
+fn talks_to_plugin(command: &Command) -> bool {
+    !matches!(
+        command,
+        Command::Start { .. }
+            | Command::Stop { .. }
+            | Command::Restart { .. }
+            | Command::Plugin(_)
+            | Command::Broker
+            | Command::Compare { .. }
+            | Command::History { .. }
+    )
+}
+
+async fn warn_on_version_mismatch(ctx: &Context) {
+    if let Ok(hello) = commands::status::hello(ctx).await
+        && let Some(plugin) = commands::status::mismatched_plugin_version(&hello)
+    {
+        eprintln!("warning: {}", commands::status::mismatch_warning(plugin));
+    }
+}
+
 async fn run(cli: Cli, json: bool) -> u8 {
     let paths = match Paths::from_env() {
         Ok(paths) => paths,
@@ -1363,6 +1396,9 @@ async fn run(cli: Cli, json: bool) -> u8 {
         connect_timeout: Duration::from_secs_f64(cli.connect_timeout),
     };
     let command_line = command_line(std::env::args().skip(1));
+    if talks_to_plugin(&cli.command) {
+        warn_on_version_mismatch(&ctx).await;
+    }
     match cli.command {
         Command::Status => output::emit(commands::status::run(&ctx).await, json, output::status),
         Command::Start { launch } => output::emit(
@@ -1566,8 +1602,8 @@ async fn run(cli: Cli, json: bool) -> u8 {
             json,
             output::raw,
         ),
-        Command::Plugin(PluginCommand::Install { force }) => output::emit(
-            commands::plugin::install(&paths, force),
+        Command::Plugin(PluginCommand::Install { force, dev }) => output::emit(
+            commands::plugin::install(&paths, force, dev),
             json,
             output::plugin_install,
         ),

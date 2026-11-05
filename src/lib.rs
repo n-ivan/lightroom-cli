@@ -9,6 +9,7 @@ pub mod history;
 pub mod log;
 pub mod paths;
 pub mod platform;
+pub mod plugin_files;
 pub mod plugin_link;
 pub mod protocol;
 pub mod settings;

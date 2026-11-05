@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install luajit
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - run: make check
+      - name: Tag matches Cargo version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          cargo_version=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          if [ "$TAG" != "v$cargo_version" ]; then
+            echo "tag $TAG does not match Cargo.toml version $cargo_version" >&2
+            exit 1
+          fi
+      - run: scripts/build-release.sh
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" \
+            dist/lrcli-macos-universal.tar.gz \
+            dist/lrcli-macos-universal.tar.gz.sha256 \
+            --generate-notes

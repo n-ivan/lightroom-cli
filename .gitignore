@@ -3,6 +3,7 @@
 
 # Rust
 /target/
+/dist/
 
 # Lightroom scratch catalog and its sidecar data
 testdata/**/*.lrcat

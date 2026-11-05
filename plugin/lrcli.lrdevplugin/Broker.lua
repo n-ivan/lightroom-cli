@@ -2,6 +2,7 @@ local Log = require 'Log'
 local PortsFile = require 'PortsFile'
 local json = require 'json'
 
+local LrFileUtils = import 'LrFileUtils'
 local LrPathUtils = import 'LrPathUtils'
 local LrTasks = import 'LrTasks'
 
@@ -11,18 +12,28 @@ local function configPath()
   return LrPathUtils.child(PortsFile.dir(), 'config.json')
 end
 
-local function readBrokerPath()
+local function readConfiguredBrokerPath()
   local file = io.open(configPath(), 'r')
   if not file then
-    return nil, configPath() .. ' is missing. Run `lrcli plugin install`.'
+    return nil, 'no bin/lrcli in the plugin and ' .. configPath() .. ' is missing. Run `lrcli plugin install`.'
   end
   local text = file:read('*a')
   file:close()
   local config, err = json.decode(text)
   if type(config) ~= 'table' or type(config.brokerPath) ~= 'string' then
-    return nil, 'invalid ' .. configPath() .. (err and (': ' .. err) or '') .. '. Run `lrcli plugin install --force`.'
+    return nil, 'invalid ' .. configPath() .. (err and (': ' .. err) or '') .. '. Run `lrcli plugin install`.'
   end
   return config.brokerPath
+end
+
+-- The release install ships its own binary so the broker always matches the
+-- plugin version; config.json is only for `plugin install --dev`.
+local function readBrokerPath()
+  local bundled = _PLUGIN.path .. '/bin/lrcli'
+  if LrFileUtils.exists(bundled) then
+    return bundled
+  end
+  return readConfiguredBrokerPath()
 end
 
 function Broker.spawn()
