@@ -43,6 +43,17 @@ pub fn utc(unix_secs: u64) -> Utc {
     }
 }
 
+/// Inverse of `utc`'s date part (Howard Hinnant's days_from_civil), as days since 1970-01-01.
+pub fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = year - i64::from(month <= 2);
+    let era = y.div_euclid(400);
+    let year_of_era = y.rem_euclid(400);
+    let shifted_month = if month > 2 { month - 3 } else { month + 9 };
+    let day_of_year = (153 * shifted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
 pub fn iso8601(unix_secs: u64) -> String {
     let t = utc(unix_secs);
     format!(
@@ -59,5 +70,7 @@ mod tests {
     fn formats_utc_timestamps() {
         assert_eq!(iso8601(0), "1970-01-01T00:00:00Z");
         assert_eq!(iso8601(1_709_251_199), "2024-02-29T23:59:59Z");
+        assert_eq!(days_from_civil(2024, 2, 29), 19_782);
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
     }
 }

@@ -97,7 +97,7 @@ lrcli develop auto-tone auto-wb --photo 42                     # Develop actions
 lrcli module develop                                           # switch Lightroom module (library, develop, map, ...)
 lrcli tag add "Places > Paris" portrait --photo 42             # add keywords (tag remove to remove)
 lrcli rate 4 --photo 42                                        # stars; also flag picked|rejected|none, label red|...|none
-lrcli undo                                                     # revert the last recorded edit (--steps N, --dry-run)
+lrcli undo                                                     # restore the values before the last recorded edit (--steps N, --dry-run, --force)
 lrcli history                                                  # what undo would revert
 ```
 
@@ -121,8 +121,13 @@ catalog in a way `undo` cannot revert. Run `lrcli <command> --help` for all opti
 Editing commands (`apply`, `preset`, `develop`, `tag`, `rate`, `flag`, `label`) take the same
 `--photo`/`--photos -` targets and default to the current selection. Each writes
 all its photos in one step, which shows up in Lightroom's Edit > Undo menu, and
-records the replaced values in `~/.lrcli/history.jsonl` so `lrcli undo` can
-restore them (for the catalog that is open).
+records the replaced and the resulting values in `~/.lrcli/history.jsonl`.
+`lrcli undo` restores the recorded before-values (for the catalog that is open)
+for exactly the settings the command changed. It refuses photos changed since
+(someone edited them after lrcli did) unless `--force`, and can't clear settings
+that had no value before (it warns). It does not use Lightroom's own undo.
+`lrcli history` shows what undo will take back next. The history keeps the
+newest 500 entries.
 
 `develop` runs Lightroom's own Develop actions (auto tone, auto white balance,
 as-shot white balance, resets). Lightroom only runs them in the Develop module,

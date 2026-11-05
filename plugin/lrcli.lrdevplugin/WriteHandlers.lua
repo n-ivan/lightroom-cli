@@ -6,11 +6,8 @@ local Writes = require 'Writes'
 
 local LrApplication = import 'LrApplication'
 local LrTasks = import 'LrTasks'
-local LrUndo = import 'LrUndo'
 
 local WriteHandlers = {}
-
-local SETTLE_SECONDS = 0.3
 
 local function entry(info, fields)
   fields.id = info.id
@@ -299,13 +296,18 @@ function WriteHandlers.new()
 
     local entries = json.array({})
     local jobs = {}
+    local anyConflict = false
     for i, change in ipairs(changes) do
       local info = infoById[change.id]
       local warnings = {}
-      local job = { change = change, info = info, warnings = warnings, restored = {}, adds = {}, removes = {} }
+      local job = { change = change, info = info, warnings = warnings, restored = {}, adds = {}, removes = {}, conflict = {} }
       if not info then
         entries[i] = { id = change.id, filename = '', error = 'Photo is no longer in the catalog.' }
       else
+        if change.expectAfter and not args.force then
+          job.conflict = Writes.conflicts(Writes.stateOf(info.photo, change.expectAfter), change.expectAfter)
+          anyConflict = anyConflict or #job.conflict > 0
+        end
         if change.develop and info.isVideo then
           warnings[#warnings + 1] = 'Videos have no develop settings to restore.'
           change.develop = nil
@@ -329,7 +331,9 @@ function WriteHandlers.new()
       end
     end
 
-    if #jobs > 0 then
+    -- All or nothing: restoring only the unchanged photos would make the next
+    -- undo attempt see them as conflicts.
+    if #jobs > 0 and not anyConflict and not args.dryRun then
       Writes.gate(catalog, 'lrcli undo', function()
         for _, job in ipairs(jobs) do
           local photo, change = job.info.photo, job.change
@@ -359,46 +363,14 @@ function WriteHandlers.new()
 
     for i, item in ipairs(entries) do
       if item.change then
-        entries[i] = entry(item.info, { restored = jsonList(item.restored), warnings = jsonList(item.warnings) })
+        entries[i] = entry(item.info, {
+          restored = jsonList(item.restored),
+          warnings = jsonList(item.warnings),
+          conflict = jsonList(item.conflict),
+        })
       end
     end
     return { photos = entries }
-  end
-
-  -- Redoes the undo unless the catalog now matches the state the recorded step
-  -- should have restored and the previous step's result is untouched: the undo
-  -- stack cannot be inspected, and consecutive writes coalesce into one step.
-  function handlers.undo_native(args)
-    local parsed = Writes.parseUndoNative(args)
-    if not LrUndo.canUndo() then
-      return { native = false, reason = 'nothing to undo' }
-    end
-    local find = Targets.finder(LrApplication.activeCatalog())
-    local function firstMismatch(label, items)
-      for _, expected in ipairs(items) do
-        local photo = find(expected.id)
-        if not photo then
-          return label .. ': photo ' .. expected.id .. ' is no longer in the catalog'
-        end
-        local found = Writes.mismatch(Writes.stateOf(photo, expected), expected)
-        if found then
-          return label .. ': ' .. found
-        end
-      end
-      return nil
-    end
-    LrUndo.undo()
-    LrTasks.sleep(SETTLE_SECONDS)
-    local ok, reason = LrTasks.pcall(function()
-      return firstMismatch('expected state not reached', parsed.expect)
-        or firstMismatch('earlier step not preserved', parsed.keep)
-    end)
-    if ok and reason == nil then
-      return { native = true }
-    end
-    LrUndo.redo()
-    LrTasks.sleep(SETTLE_SECONDS)
-    return { native = false, reason = ok and reason or ('check failed: ' .. tostring(type(reason) == 'table' and reason.message or reason)) }
   end
 
   return handlers

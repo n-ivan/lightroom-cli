@@ -47,7 +47,7 @@ local function appendToFile(line)
 end
 
 local function write(level, message)
-  local line = os.date('%Y-%m-%d %H:%M:%S') .. ' ' .. level .. ' ' .. tostring(message)
+  local line = os.date('!%Y-%m-%dT%H:%M:%SZ') .. ' ' .. level .. ' ' .. tostring(message)
   remember(line)
   appendToFile(line)
 end

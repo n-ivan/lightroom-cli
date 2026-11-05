@@ -1,7 +1,9 @@
 use serde_json::Value;
 
-use lrcli::commands::edit::differs_from_requested;
-use lrcli::error::Error;
+use lrcli::commands::edit::{conflict_line, differs_from_requested};
+use lrcli::diagnostics::{self, Diagnostics};
+use lrcli::error::{Error, Kind};
+use lrcli::paths::Paths;
 
 const RESTART_HINT: &str = "Run `lrcli restart` so Lightroom Classic loads the plugin.";
 
@@ -25,15 +27,40 @@ pub fn emit(result: Result<Value, Error>, json: bool, human: Formatter) -> u8 {
 }
 
 pub fn emit_error(error: &Error, json: bool) {
+    let diagnostics = (error.kind == Kind::Unreachable)
+        .then(|| {
+            Paths::from_env()
+                .ok()
+                .map(|paths| diagnostics::recent(&paths))
+        })
+        .flatten();
     if json {
-        println!("{}", error_json(error));
+        println!("{}", error_json(error, diagnostics.as_ref()));
     } else {
         eprintln!("error: {}", error.message);
+        if let Some(diagnostics) = &diagnostics {
+            for (title, lines) in [
+                ("Recent plugin log:", &diagnostics.plugin),
+                ("Recent broker log:", &diagnostics.broker),
+            ] {
+                if !lines.is_empty() {
+                    eprintln!("{title}");
+                    for line in lines {
+                        eprintln!("  {line}");
+                    }
+                }
+            }
+        }
     }
 }
 
-fn error_json(error: &Error) -> Value {
-    serde_json::json!({ "ok": false, "error": error.code, "message": error.message })
+fn error_json(error: &Error, diagnostics: Option<&Diagnostics>) -> Value {
+    let mut body =
+        serde_json::json!({ "ok": false, "error": error.code, "message": error.message });
+    if let Some(diagnostics) = diagnostics {
+        body["diagnostics"] = diagnostics.to_json();
+    }
+    body
 }
 
 fn text<'a>(value: &'a Value, pointer: &str) -> &'a str {
@@ -727,23 +754,17 @@ pub fn undo(value: &Value) -> String {
             text(item, "/command"),
             text(item, "/time")
         ));
-        if !dry_run {
-            lines.push(if item["method"] == "native" {
-                "  undone with Lightroom's undo".to_string()
-            } else {
-                match str_at(item, "nativeSkipped") {
-                    Some(reason) => {
-                        format!("  restored values (Lightroom's undo not used: {reason})")
-                    }
-                    None => "  restored values".to_string(),
-                }
-            });
-        }
         if dry_run {
             lines.extend(
                 changes_of(item)
                     .iter()
                     .map(|change| format!("  {}", change_summary(change))),
+            );
+            lines.extend(
+                photos_of(item)
+                    .iter()
+                    .filter_map(conflict_line)
+                    .map(|line| format!("  {line}")),
             );
             continue;
         }
@@ -890,7 +911,7 @@ mod tests {
     fn errors_render_as_json_without_an_id() {
         let error = Error::failed("boom", "it broke");
         assert_eq!(
-            error_json(&error),
+            error_json(&error, None),
             json!({ "ok": false, "error": "boom", "message": "it broke" })
         );
     }

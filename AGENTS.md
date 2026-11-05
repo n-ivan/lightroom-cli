@@ -114,13 +114,9 @@ counts as unsupported unless verified live.
   are stored, and a photo holding them renders as if none of its develop edits
   applied. `apply` therefore checks `DevelopRanges` (raw vs non-raw by
   `fileFormat`) and errors per photo; `restore` writes recorded values as-is.
-- `LrUndo` has only `canUndo/canRedo/undo/redo`; there is no way to see what
-  will be undone, and consecutive `withWriteAccessDo` calls without user
-  interaction coalesce into ONE undo step (so a second undo can revert an
-  unrelated action). `undo_native` therefore undoes once, waits 0.3 s, verifies
-  the recorded before-state (absent keys must be nil) and the previous lrcli
-  step's after-state, and redoes if either differs; `lrcli undo` then falls
-  back to `restore`, which cannot clear keys that had no value before.
+- Undo restores recorded before-values with a conflict check; LrUndo isn't used
+  because it can't be inspected and coalesces consecutive scripted edits (one
+  undo reverted three develop runs across two photos).
 - `LrDevelopController` acts on the current photo and only in the Develop
   module, so `develop` selects each photo (`setSelectedPhotos`), switches module
   (1 s sleep, 0.3 s per photo once there) and restores module and selection
@@ -130,9 +126,7 @@ counts as unsupported unless verified live.
   'As Shot')` does nothing, so a gate applies `WhiteBalance = 'As Shot'`.
 - Controller changes show up in `getDevelopSettings` a moment late, so
   `develop` polls (0.1 s, up to 2 s) until they differ from the before-snapshot;
-  an action can legitimately change nothing. Controller edits sit on
-  Lightroom's undo stack and coalesce like any others, so their history entries
-  rely on the verified `undo_native` check and the `restore` fallback.
+  an action can legitimately change nothing.
 - Decoded JSON arrays carry json.lua's marker metatable and must reach the SDK
   as plain tables (`Writes.plain`); otherwise `withWriteAccessDo` hangs on commit.
 - `LR_jpeg_quality` is 0..1, not 0..100. `LR_size_resizeType = 'longEdge'` is

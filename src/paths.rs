@@ -44,6 +44,10 @@ impl Paths {
         self.dir.join("broker.log")
     }
 
+    pub fn plugin_log(&self) -> PathBuf {
+        self.dir.join("plugin.log")
+    }
+
     pub fn history(&self) -> PathBuf {
         self.dir.join("history.jsonl")
     }

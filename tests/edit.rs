@@ -541,10 +541,6 @@ async fn rate_flag_and_label_send_values_and_record_only_changes() {
     assert_eq!(run(plugin.home(), &["label", "pink"]).await.code, 2);
 }
 
-fn no_native() -> Value {
-    json!({ "native": false, "reason": "test" })
-}
-
 fn restore_reply() -> Value {
     json!({ "photos": [{ "id": 1, "filename": "a", "restored": ["rating"], "warnings": [] }] })
 }
@@ -557,7 +553,6 @@ async fn undo_restores_recorded_values_and_drops_the_entry() {
         json!({ "photos": [{ "id": 1, "filename": "a", "before": 2, "after": 4 }] }),
     );
     plugin.canned("restore", restore_reply());
-    plugin.canned("undo_native", no_native());
     run(plugin.home(), &["rate", "4", "--photo", "1"]).await;
 
     let dry = run(plugin.home(), &["undo", "--dry-run"]).await;
@@ -568,14 +563,14 @@ async fn undo_restores_recorded_values_and_drops_the_entry() {
         dry.stdout
     );
     assert!(dry.stdout.contains("photo 1: rating"), "{}", dry.stdout);
-    assert_eq!(requests(&plugin, "restore"), 0);
+    assert_eq!(plugin.last_args("restore")["dryRun"], true);
     assert_eq!(history(&plugin).len(), 1);
 
     let out = run(plugin.home(), &["undo"]).await;
     assert_eq!(out.code, 0, "{}", out.stderr);
     assert_eq!(
         plugin.last_args("restore"),
-        json!({ "changes": [{ "id": 1, "rating": 2 }] })
+        json!({ "changes": [{ "id": 1, "rating": 2, "expectAfter": { "rating": 4 } }] })
     );
     assert!(
         out.stdout.contains("Undid: lrcli rate 4 --photo 1"),
@@ -610,7 +605,6 @@ async fn undo_steps_run_newest_first_and_skip_other_catalogs() {
     let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
     std::fs::write(plugin.home().join("history.jsonl"), text).unwrap();
     plugin.canned("restore", restore_reply());
-    plugin.canned("undo_native", no_native());
 
     let out = run(plugin.home(), &["--json", "undo", "--steps", "2"]).await;
     assert_eq!(out.code, 0, "{}", out.stderr);
@@ -639,7 +633,6 @@ async fn undo_failure_keeps_the_entry() {
     let (plugin, _broker) = start_broker(Options::default()).await;
     let line = json!({ "time": "t", "command": "c", "catalog": CATALOG, "changes": [{ "id": 1, "rating": 1 }] });
     std::fs::write(plugin.home().join("history.jsonl"), format!("{line}\n")).unwrap();
-    plugin.canned("undo_native", no_native());
     plugin.canned(
         "restore",
         json!({ "error": "write_busy", "message": "Lightroom couldn't get write access" }),
@@ -650,68 +643,43 @@ async fn undo_failure_keeps_the_entry() {
     assert_eq!(history(&plugin).len(), 1);
 }
 
-#[tokio::test]
-async fn native_undo_success_pops_the_entry_without_restoring() {
-    let (plugin, _broker) = start_broker(Options::default()).await;
-    let older = json!({ "time": "t1", "command": "older", "catalog": CATALOG, "changes": [
-        { "id": 1, "rating": 1, "ratingAfter": 2, "keywordsAdded": ["K"], "keywordsRemoved": [] }] });
-    let newer = json!({ "time": "t2", "command": "newer", "catalog": CATALOG, "changes": [
-        { "id": 1, "develop": { "A": 1, "B": null }, "developAfter": { "A": 2, "B": 3 },
-          "rating": 2, "ratingAfter": 4, "keywordsAdded": [], "keywordsRemoved": ["J"] },
-        { "id": 2, "flag": "none" }] });
-    std::fs::write(
-        plugin.home().join("history.jsonl"),
-        format!("{older}\n{newer}\n"),
-    )
-    .unwrap();
-    plugin.canned("undo_native", json!({ "native": true }));
+fn conflict_reply() -> Value {
+    json!({ "photos": [
+        { "id": 1, "filename": "a", "restored": [], "warnings": [], "conflict": ["Exposure2012 is 0.6, lrcli set 0.5"] },
+        { "id": 2, "filename": "b", "restored": [], "warnings": [], "conflict": [] },
+    ]})
+}
 
-    let out = run(plugin.home(), &["undo"]).await;
-    assert_eq!(out.code, 0, "{}", out.stderr);
-    assert_eq!(
-        plugin.last_args("undo_native"),
-        json!({
-            "expect": [
-                { "id": 1, "develop": { "A": 1, "B": null }, "rating": 2, "keywordsPresent": ["J"] },
-                { "id": 2, "flag": "none" },
-            ],
-            "keep": [
-                { "id": 1, "rating": 2, "keywordsPresent": ["K"] },
-            ],
-        })
-    );
-    assert_eq!(requests(&plugin, "restore"), 0);
-    assert!(
-        out.stdout.contains("undone with Lightroom's undo"),
-        "{}",
-        out.stdout
-    );
-    let left = history(&plugin);
-    assert_eq!(left.len(), 1);
-    assert_eq!(left[0]["command"], "older");
+fn write_history(plugin: &FakePlugin, lines: &[Value]) {
+    let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    std::fs::write(plugin.home().join("history.jsonl"), text).unwrap();
+}
+
+fn develop_entry(command: &str) -> Value {
+    json!({ "time": "t", "command": command, "catalog": CATALOG, "changes": [
+        { "id": 1, "develop": { "Exposure2012": 0, "Temperature": null },
+          "developAfter": { "Exposure2012": 0.5, "Temperature": 4000 } },
+        { "id": 2, "rating": 1, "ratingAfter": 3 }] })
 }
 
 #[tokio::test]
-async fn failed_native_undo_falls_back_to_restore_and_warns_about_uncleared_keys() {
+async fn undo_sends_expected_after_values_and_warns_about_uncleared_keys() {
     let (plugin, _broker) = start_broker(Options::default()).await;
-    let line = json!({ "time": "t", "command": "c", "catalog": CATALOG, "changes": [
-        { "id": 1, "develop": { "A": 1, "Temperature": null }, "developAfter": { "A": 2, "Temperature": 4000 } }] });
-    std::fs::write(plugin.home().join("history.jsonl"), format!("{line}\n")).unwrap();
-    plugin.canned(
-        "undo_native",
-        json!({ "native": false, "reason": "photo 1: A is 2, expected 1" }),
-    );
+    write_history(&plugin, &[develop_entry("lrcli apply")]);
     plugin.canned(
         "restore",
-        json!({ "photos": [{ "id": 1, "filename": "a", "restored": ["develop"], "warnings": [] }] }),
+        json!({ "photos": [{ "id": 1, "filename": "a", "restored": ["develop"], "warnings": [], "conflict": [] }] }),
     );
     let out = run(plugin.home(), &["undo"]).await;
     assert_eq!(out.code, 0, "{}", out.stderr);
     assert_eq!(
         plugin.last_args("restore"),
-        json!({ "changes": [{ "id": 1, "develop": { "A": 1, "Temperature": null } }] })
+        json!({ "changes": [
+            { "id": 1, "develop": { "Exposure2012": 0, "Temperature": null },
+              "expectAfter": { "develop": { "Exposure2012": 0.5, "Temperature": 4000 } } },
+            { "id": 2, "rating": 1, "expectAfter": { "rating": 3 } },
+        ]})
     );
-    assert!(out.stdout.contains("restored values"), "{}", out.stdout);
     assert!(
         out.stdout
             .contains("warning: Temperature had no value before"),
@@ -722,14 +690,85 @@ async fn failed_native_undo_falls_back_to_restore_and_warns_about_uncleared_keys
 }
 
 #[tokio::test]
-async fn dry_run_undo_sends_nothing_to_lightroom_beyond_status() {
+async fn undo_conflict_keeps_the_entry_stops_and_exits_1() {
     let (plugin, _broker) = start_broker(Options::default()).await;
-    let line = json!({ "time": "t", "command": "c", "catalog": CATALOG, "changes": [{ "id": 1, "rating": 1, "ratingAfter": 2 }] });
-    std::fs::write(plugin.home().join("history.jsonl"), format!("{line}\n")).unwrap();
+    write_history(
+        &plugin,
+        &[
+            json!({ "time": "t0", "command": "older", "catalog": CATALOG, "changes": [{ "id": 1, "rating": 1 }] }),
+            develop_entry("newer"),
+        ],
+    );
+    plugin.canned("restore", conflict_reply());
+    let out = run(plugin.home(), &["undo", "--steps", "2"]).await;
+    assert_eq!(out.code, 1, "{}", out.stderr);
+    assert!(
+        out.stderr.contains(
+            "a (id 1): skipped: changed since lrcli edited it (Exposure2012 is 0.6, lrcli set 0.5). Re-run with --force to restore anyway."
+        ),
+        "{}",
+        out.stderr
+    );
+    assert_eq!(requests(&plugin, "restore"), 1);
+    assert_eq!(history(&plugin).len(), 2);
+
+    let json_out = run(plugin.home(), &["--json", "undo"]).await;
+    assert_eq!(json_out.code, 1);
+    assert_eq!(json_out.json()["error"], "undo_conflict");
+}
+
+#[tokio::test]
+async fn undo_force_is_passed_through() {
+    let (plugin, _broker) = start_broker(Options::default()).await;
+    write_history(&plugin, &[develop_entry("lrcli apply")]);
+    plugin.canned(
+        "restore",
+        json!({ "photos": [{ "id": 1, "filename": "a", "restored": ["develop"], "warnings": [], "conflict": [] }] }),
+    );
+    let out = run(plugin.home(), &["undo", "--force"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(plugin.last_args("restore")["force"], true);
+    assert!(history(&plugin).is_empty());
+}
+
+#[tokio::test]
+async fn undo_dry_run_asks_the_plugin_to_check_only_and_reports_conflicts() {
+    let (plugin, _broker) = start_broker(Options::default()).await;
+    write_history(&plugin, &[develop_entry("lrcli apply")]);
+    plugin.canned("restore", conflict_reply());
     let out = run(plugin.home(), &["undo", "--dry-run"]).await;
     assert_eq!(out.code, 0, "{}", out.stderr);
-    assert_eq!(requests(&plugin, "undo_native"), 0);
-    assert_eq!(requests(&plugin, "restore"), 0);
+    assert_eq!(requests(&plugin, "restore"), 1);
+    assert_eq!(plugin.last_args("restore")["dryRun"], true);
+    assert!(
+        out.stdout.contains("Would undo: lrcli apply"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("a (id 1): skipped: changed since"),
+        "{}",
+        out.stdout
+    );
+    assert_eq!(history(&plugin).len(), 1);
+}
+
+#[tokio::test]
+async fn undo_of_entries_without_after_values_sends_no_expectation() {
+    let (plugin, _broker) = start_broker(Options::default()).await;
+    write_history(
+        &plugin,
+        &[
+            json!({ "time": "t", "command": "c", "catalog": CATALOG, "changes": [{ "id": 1, "rating": 1 }] }),
+        ],
+    );
+    plugin.canned("restore", restore_reply());
+    let out = run(plugin.home(), &["undo"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(
+        plugin.last_args("restore"),
+        json!({ "changes": [{ "id": 1, "rating": 1 }] })
+    );
 }
 
 #[tokio::test]

@@ -879,13 +879,10 @@ local function writeFixture(opts)
   return catalog, photos, log
 end
 
-local function loadWriteHandlers(catalog, modules)
+local function loadWriteHandlers(catalog)
   _G.import = function(name)
     if name == 'LrApplication' then
       return { activeCatalog = function() return catalog end, developPresetFolders = function() return {} end }
-    end
-    if modules and modules[name] then
-      return modules[name]
     end
     return { pcall = pcall }
   end
@@ -983,41 +980,47 @@ test('writes: ranges pick raw or non-raw by file format and flag out-of-range nu
   assert(Writes.rangeError({ Temperature = 5500 }, all.nonRaw), 'raw temperature is out of the non-raw range')
 end)
 
-test('writes: parseUndoNative validates expectations', function()
-  local parsed = Writes.parseUndoNative(json.decode(
-    '{"expect":[{"id":1,"develop":{"A":1,"B":null},"rating":0,"flag":"picked","label":"red","keywordsPresent":["K"]}],'
-    .. '"keep":[{"id":2,"keywordsAbsent":["J"]}]}'))
-  eq(parsed.expect[1].develop.B, json.null)
-  eq(parsed.expect[1].flag, 'picked')
-  eq(parsed.expect[1].rating, 0)
-  eq(parsed.keep[1].keywordsAbsent[1], 'J')
-  eq(#Writes.parseUndoNative({ expect = { { id = 1 } } }).keep, 0)
-  badRequest(Writes.parseUndoNative, {})
-  badRequest(Writes.parseUndoNative, { expect = { { id = 'x' } } })
-  badRequest(Writes.parseUndoNative, { expect = { { id = 1, rating = 9 } } })
+test('writes: parseRestore validates expectAfter', function()
+  local change = Writes.parseRestore(json.decode(
+    '{"changes":[{"id":1,"expectAfter":{"develop":{"A":1,"B":null},"rating":0,"flag":"picked","label":"red","keywordsPresent":["K"]}}]}'))[1]
+  eq(change.expectAfter.develop.B, json.null)
+  eq(change.expectAfter.flag, 'picked')
+  eq(change.expectAfter.rating, 0)
+  eq(change.expectAfter.keywordsPresent[1], 'K')
+  eq(#change.expectAfter.keywordsAbsent, 0)
+  eq(Writes.parseRestore({ changes = { { id = 1 } } })[1].expectAfter, nil)
+  badRequest(Writes.parseRestore, { changes = { { id = 1, expectAfter = 'x' } } })
+  badRequest(Writes.parseRestore, { changes = { { id = 1, expectAfter = { rating = 9 } } } })
 end)
 
-test('writes: mismatch compares with tolerance, absent keys, tables and keywords', function()
-  local expected = Writes.parseUndoNative(json.decode(
-    '{"expect":[{"id":1,"develop":{"A":0.5,"B":null,"T":[1,2]},"rating":3,"keywordsPresent":["P"],"keywordsAbsent":["Q"]}]}')).expect[1]
-  local state = { develop = { A = 0.5 + 1e-9, T = { 1, 2 } }, rating = 3, keywordPaths = { p = true } }
-  eq(Writes.mismatch(state, expected), nil)
-  state.develop.B = 4
-  eq(Writes.mismatch(state, expected), 'photo 1: B is 4, expected absent')
-  state.develop.B = nil
-  state.develop.A = 0.6
-  eq(Writes.mismatch(state, expected), 'photo 1: A is 0.6, expected 0.5')
-  state.develop.A = 0.5
-  state.develop.T = { 1, 3 }
-  assert(Writes.mismatch(state, expected):find('T is'), 'table difference')
-  state.develop.T = { 1, 2 }
-  state.rating = 2
-  eq(Writes.mismatch(state, expected), 'photo 1: rating is 2, expected 3')
-  state.rating = 3
-  state.keywordPaths = {}
-  eq(Writes.mismatch(state, expected), 'photo 1: keyword "P" is missing')
-  state.keywordPaths = { p = true, q = true }
-  eq(Writes.mismatch(state, expected), 'photo 1: keyword "Q" is still present')
+test('writes: conflicts compare with tolerance, absent keys, tables, metadata and keywords', function()
+  local expected = Writes.parseRestore(json.decode(
+    '{"changes":[{"id":1,"expectAfter":{"develop":{"A":0.5,"B":null,"T":[1,2]},"rating":3,"flag":"picked","label":"red",'
+    .. '"keywordsPresent":["P"],"keywordsAbsent":["Q"]}}]}'))[1].expectAfter
+  local function state()
+    return { develop = { A = 0.5 + 1e-9, T = { 1, 2 } }, rating = 3, flag = 'picked', label = 'red', keywordPaths = { p = true } }
+  end
+  eq(#Writes.conflicts(state(), expected), 0)
+  local s = state()
+  s.develop.B = 4
+  eq(Writes.conflicts(s, expected)[1], 'B is 4, lrcli set absent')
+  s = state()
+  s.develop.A = 0.6
+  eq(Writes.conflicts(s, expected)[1], 'A is 0.6, lrcli set 0.5')
+  s = state()
+  s.develop.T = { 1, 3 }
+  assert(Writes.conflicts(s, expected)[1]:find('T is'), 'table difference')
+  s = state()
+  s.rating, s.flag, s.label = 2, 'rejected', 'none'
+  local found = Writes.conflicts(s, expected)
+  eq(found[1], 'rating is 2, lrcli set 3')
+  eq(found[2], 'flag is rejected, lrcli set picked')
+  eq(found[3], 'label is none, lrcli set red')
+  s = state()
+  s.keywordPaths = { q = true }
+  found = Writes.conflicts(s, expected)
+  eq(found[1], 'keyword "P" is gone, lrcli added it')
+  eq(found[2], 'keyword "Q" is back, lrcli removed it')
 end)
 
 test('handlers: apply rejects out-of-range values per photo before writing', function()
@@ -1030,56 +1033,43 @@ test('handlers: apply rejects out-of-range values per photo before writing', fun
   eq(relative.photos[1].error, "Exposure2012=5.5 is outside Lightroom's range -5..5.")
 end)
 
-local function undoFixture(afterUndo)
-  local catalog, photos = writeFixture()
-  local calls = {}
-  local undo = {
-    canUndo = function() return true end,
-    undo = function() calls[#calls + 1] = 'undo' afterUndo(photos) end,
-    redo = function() calls[#calls + 1] = 'redo' end,
+test('handlers: restore refuses all photos when one changed since lrcli, unless forced', function()
+  local catalog, photos, log = writeFixture()
+  local handlers = loadWriteHandlers(catalog)
+  local args = {
+    changes = {
+      { id = 1, rating = 5, expectAfter = { rating = 2, develop = { Exposure2012 = 0.5 } } },
+    },
   }
-  local handlers = loadWriteHandlers(catalog, { LrUndo = undo, LrTasks = { pcall = pcall, sleep = function() end } })
-  return handlers, calls
-end
+  local reply = handlers.restore(args)
+  eq(#log, 0)
+  eq(reply.photos[1].conflict[1], 'Exposure2012 is 1, lrcli set 0.5')
+  eq(#reply.photos[1].restored, 0)
 
-test('handlers: undo_native keeps the undo when expected and kept states match', function()
-  local handlers, calls = undoFixture(function(photos) photos[1].develop.Exposure2012 = nil end)
-  local reply = handlers.undo_native({
-    expect = { { id = 1, develop = { Exposure2012 = json.null }, rating = 2 } },
-    keep = { { id = 1, develop = { Contrast2012 = 0 } } },
-  })
-  eq(reply.native, true)
-  eq(table.concat(calls, ' '), 'undo')
+  args.force = true
+  reply = handlers.restore(args)
+  eq(#reply.photos[1].conflict, 0)
+  eq(json.encode(reply.photos[1].restored), '["rating"]')
+  eq(photos[1].meta.rating, 5)
 end)
 
-test('handlers: undo_native redoes when the state is not reached or a kept state changed', function()
-  local handlers, calls = undoFixture(function() end)
-  local reply = handlers.undo_native({ expect = { { id = 1, develop = { Exposure2012 = 0 } } } })
-  eq(reply.native, false)
-  assert(reply.reason:find('Exposure2012 is 1'), reply.reason)
-  eq(table.concat(calls, ' '), 'undo redo')
-
-  handlers, calls = undoFixture(function(photos) photos[1].develop.Contrast2012 = 9 end)
-  reply = handlers.undo_native({ expect = { { id = 1, rating = 2 } }, keep = { { id = 1, develop = { Contrast2012 = 0 } } } })
-  eq(reply.native, false)
-  assert(reply.reason:find('earlier step not preserved'), reply.reason)
-  eq(table.concat(calls, ' '), 'undo redo')
-
-  handlers = undoFixture(function() end)
-  assert(handlers.undo_native({ expect = { { id = 77, rating = 1 } } }).reason:find('no longer in the catalog'))
+test('handlers: restore proceeds when the current values match expectAfter', function()
+  local catalog, _, log = writeFixture()
+  local handlers = loadWriteHandlers(catalog)
+  local reply = handlers.restore({ changes = { { id = 1, rating = 5, expectAfter = { rating = 2, develop = { Exposure2012 = 1 } } } } })
+  eq(#reply.photos[1].conflict, 0)
+  eq(table.concat(log, ' '), 'gate:lrcli undo:10 set:1:rating=5')
 end)
 
-test('handlers: undo_native does nothing when LrUndo has nothing to undo', function()
-  local catalog = writeFixture()
-  local calls = {}
-  local handlers = loadWriteHandlers(catalog, { LrUndo = {
-    canUndo = function() return false end,
-    undo = function() calls[#calls + 1] = 'undo' end,
-  } })
-  local reply = handlers.undo_native({ expect = { { id = 1, rating = 2 } } })
-  eq(reply.native, false)
-  eq(reply.reason, 'nothing to undo')
-  eq(#calls, 0)
+test('handlers: restore dryRun only reports conflicts', function()
+  local catalog, _, log = writeFixture()
+  local handlers = loadWriteHandlers(catalog)
+  local reply = handlers.restore({ dryRun = true, changes = { { id = 1, rating = 5, expectAfter = { rating = 3 } } } })
+  eq(#log, 0)
+  eq(reply.photos[1].conflict[1], 'rating is 2, lrcli set 3')
+  reply = handlers.restore({ dryRun = true, changes = { { id = 1, rating = 5 } } })
+  eq(#log, 0)
+  eq(#reply.photos[1].conflict, 0)
 end)
 
 local PanelSettings = require 'PanelSettings'

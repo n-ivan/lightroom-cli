@@ -50,7 +50,13 @@ fn io_error(paths: &Paths, e: std::io::Error) -> Error {
     )
 }
 
+pub const MAX_ENTRIES: usize = 500;
+
 pub fn append(paths: &Paths, entry: &Value) -> Result<(), Error> {
+    append_capped(paths, entry, MAX_ENTRIES)
+}
+
+fn append_capped(paths: &Paths, entry: &Value, cap: usize) -> Result<(), Error> {
     paths.ensure_dir()?;
     let mut line = entry.to_string();
     line.push('\n');
@@ -59,6 +65,24 @@ pub fn append(paths: &Paths, entry: &Value) -> Result<(), Error> {
         .append(true)
         .open(paths.history())
         .and_then(|mut file| file.write_all(line.as_bytes()))
+        .map_err(|e| io_error(paths, e))?;
+    trim(paths, cap)
+}
+
+fn trim(paths: &Paths, cap: usize) -> Result<(), Error> {
+    let text = std::fs::read_to_string(paths.history()).map_err(|e| io_error(paths, e))?;
+    let excess = text.lines().count().saturating_sub(cap);
+    if excess == 0 {
+        return Ok(());
+    }
+    let kept: Vec<&str> = text.lines().skip(excess).collect();
+    write_atomically(paths, &format!("{}\n", kept.join("\n")))
+}
+
+fn write_atomically(paths: &Paths, text: &str) -> Result<(), Error> {
+    let tmp = paths.history().with_extension("jsonl.tmp");
+    std::fs::write(&tmp, text)
+        .and_then(|()| std::fs::rename(&tmp, paths.history()))
         .map_err(|e| io_error(paths, e))
 }
 
@@ -109,10 +133,7 @@ pub fn remove(paths: &Paths, done: &[Recorded]) -> Result<(), Error> {
     if !out.is_empty() {
         out.push('\n');
     }
-    let tmp = paths.history().with_extension("jsonl.tmp");
-    std::fs::write(&tmp, out)
-        .and_then(|()| std::fs::rename(&tmp, paths.history()))
-        .map_err(|e| io_error(paths, e))
+    write_atomically(paths, &out)
 }
 
 #[cfg(test)]
@@ -127,6 +148,21 @@ mod tests {
 
     fn record(paths: &Paths, command: &str, catalog: &str) {
         append(paths, &entry(command, catalog, vec![json!({ "id": 1 })])).unwrap();
+    }
+
+    #[test]
+    fn only_the_newest_entries_are_kept_past_the_cap() {
+        let (_dir, paths) = setup();
+        for n in 1..=5 {
+            append_capped(&paths, &entry(&format!("c{n}"), "/c", vec![]), 3).unwrap();
+        }
+        let commands: Vec<String> = load(&paths)
+            .unwrap()
+            .iter()
+            .map(|r| r.entry["command"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(commands, ["c3", "c4", "c5"]);
+        assert!(!paths.history().with_extension("jsonl.tmp").exists());
     }
 
     #[test]

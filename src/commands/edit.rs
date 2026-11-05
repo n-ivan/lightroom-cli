@@ -445,42 +445,27 @@ fn describe(record: &Recorded) -> Value {
 
 const AFTER_FIELDS: [&str; 4] = ["developAfter", "ratingAfter", "flagAfter", "labelAfter"];
 
-/// The state a change's photo should be in before the change (`after == false`)
-/// or after it, in the shape `undo_native` checks.
-fn state_of(change: &Value, after: bool) -> Value {
+/// What a change's photo should still hold if nothing touched it since lrcli
+/// wrote it; None for entries recorded without after-values.
+fn expect_after(change: &Value) -> Option<Value> {
     let mut state = Map::new();
-    state.insert("id".into(), change["id"].clone());
     for field in ["develop", "rating", "flag", "label"] {
-        let source = if after {
-            format!("{field}After")
-        } else {
-            field.to_string()
-        };
-        if let Some(value) = change.get(&source).filter(|v| !v.is_null()) {
+        if let Some(value) = change.get(format!("{field}After")).filter(|v| !v.is_null()) {
             state.insert(field.into(), value.clone());
         }
     }
-    let list = |key: &str| change.get(key).cloned().unwrap_or_else(|| json!([]));
-    let (present, absent) = if after {
-        ("keywordsAdded", "keywordsRemoved")
-    } else {
-        ("keywordsRemoved", "keywordsAdded")
-    };
-    for (field, source) in [("keywordsPresent", present), ("keywordsAbsent", absent)] {
-        let names = list(source);
-        if names.as_array().is_some_and(|names| !names.is_empty()) {
-            state.insert(field.into(), names);
+    for (field, source) in [
+        ("keywordsPresent", "keywordsAdded"),
+        ("keywordsAbsent", "keywordsRemoved"),
+    ] {
+        if let Some(names) = change
+            .get(source)
+            .filter(|v| v.as_array().is_some_and(|names| !names.is_empty()))
+        {
+            state.insert(field.into(), names.clone());
         }
     }
-    Value::Object(state)
-}
-
-fn states_of(record: &Recorded, after: bool) -> Vec<Value> {
-    changes_in(record)
-        .iter()
-        .map(|change| state_of(change, after))
-        .filter(|state| state.as_object().is_some_and(|fields| fields.len() > 1))
-        .collect()
+    (!state.is_empty()).then_some(Value::Object(state))
 }
 
 fn changes_in(record: &Recorded) -> &[Value] {
@@ -492,12 +477,15 @@ fn changes_in(record: &Recorded) -> &[Value] {
 fn restore_changes(record: &Recorded) -> Vec<Value> {
     changes_in(record)
         .iter()
-        .map(|change| {
-            let mut change = change.clone();
+        .map(|recorded| {
+            let mut change = recorded.clone();
             if let Some(fields) = change.as_object_mut() {
                 for field in AFTER_FIELDS {
                     fields.remove(field);
                 }
+            }
+            if let Some(expected) = expect_after(recorded) {
+                change["expectAfter"] = expected;
             }
             change
         })
@@ -555,7 +543,57 @@ fn after_earlier_steps(e: Error, done: usize) -> Error {
     )
 }
 
-pub async fn undo(ctx: &Context, steps: usize, dry_run: bool) -> Result<Value, Error> {
+/// Per photo, the line telling why `undo` left it alone; None if it had no conflict.
+pub fn conflict_line(photo: &Value) -> Option<String> {
+    let reasons: Vec<&str> = photo
+        .get("conflict")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    if reasons.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} (id {}): skipped: changed since lrcli edited it ({}). Re-run with --force to restore anyway.",
+        photo["filename"].as_str().unwrap_or("?"),
+        photo["id"],
+        reasons.join("; ")
+    ))
+}
+
+fn conflicts_error(photos: &Value, record: &Recorded, done: usize) -> Option<Error> {
+    let lines: Vec<String> = photos
+        .as_array()?
+        .iter()
+        .filter_map(conflict_line)
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let mut message = format!(
+        "Not undone: {}\n{}\nNo photo of this step was restored and the step is still in the history.",
+        record.entry["command"].as_str().unwrap_or("unknown"),
+        lines.join("\n")
+    );
+    if done > 0 {
+        message.push_str(&format!(" {done} earlier step(s) were already undone."));
+    }
+    Some(Error::failed("undo_conflict", message))
+}
+
+fn restore_request(record: &Recorded, force: bool, dry_run: bool) -> Value {
+    let mut request = json!({ "changes": restore_changes(record) });
+    if force {
+        request["force"] = json!(true);
+    }
+    if dry_run {
+        request["dryRun"] = json!(true);
+    }
+    request
+}
+
+pub async fn undo(ctx: &Context, steps: usize, dry_run: bool, force: bool) -> Result<Value, Error> {
     let catalog = catalog_path(ctx).await?;
     let records = history::load(&ctx.paths)?;
     let all = history::latest_for_catalog(&records, &catalog, usize::MAX);
@@ -567,41 +605,30 @@ pub async fn undo(ctx: &Context, steps: usize, dry_run: bool) -> Result<Value, E
     }
     let picked = &all[..steps.min(all.len())];
     if dry_run {
-        let would: Vec<Value> = picked.iter().map(describe).collect();
+        let mut would: Vec<Value> = picked.iter().map(describe).collect();
+        // Later steps can only be checked once the newer ones are undone.
+        let reply = ctx
+            .connect()
+            .await?
+            .request("restore", restore_request(&picked[0], force, true))
+            .await?;
+        would[0]["photos"] = reply["photos"].clone();
         return Ok(json!({ "ok": true, "dryRun": true, "undo": would }));
     }
     let mut undone = Vec::new();
-    for (index, record) in picked.iter().enumerate() {
-        let mut keep = Vec::new();
-        if let Some(previous) = all.get(index + 1) {
-            keep = states_of(previous, true);
+    for record in picked {
+        let mut reply = ctx
+            .connect()
+            .await?
+            .request("restore", restore_request(record, force, false))
+            .await
+            .map_err(|e| after_earlier_steps(e, undone.len()))?;
+        if let Some(error) = conflicts_error(&reply["photos"], record, undone.len()) {
+            return Err(error);
         }
-        let expect = states_of(record, false);
+        warn_uncleared(record, &mut reply);
         let mut item = describe(record);
-        let attempt = if expect.is_empty() {
-            json!({ "native": false, "reason": "the recorded step has nothing to verify" })
-        } else {
-            ctx.connect()
-                .await?
-                .request("undo_native", json!({ "expect": expect, "keep": keep }))
-                .await
-                .map_err(|e| after_earlier_steps(e, undone.len()))?
-        };
-        if attempt["native"] == true {
-            item["method"] = json!("native");
-        } else {
-            let request = json!({ "changes": restore_changes(record) });
-            let mut reply = ctx
-                .connect()
-                .await?
-                .request("restore", request)
-                .await
-                .map_err(|e| after_earlier_steps(e, undone.len()))?;
-            warn_uncleared(record, &mut reply);
-            item["method"] = json!("restore");
-            item["nativeSkipped"] = attempt["reason"].clone();
-            item["photos"] = reply["photos"].clone();
-        }
+        item["photos"] = reply["photos"].clone();
         history::remove(&ctx.paths, std::slice::from_ref(record))?;
         undone.push(item);
     }
@@ -656,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    fn expected_and_kept_states_use_before_and_after_values() {
+    fn restore_changes_carry_before_values_and_expected_after_values() {
         let record = rating_record(json!({
             "id": 1,
             "develop": { "B": 2, "C": null },
@@ -665,28 +692,28 @@ mod tests {
             "keywordsAdded": ["K"], "keywordsRemoved": ["J"],
         }));
         assert_eq!(
-            states_of(&record, false),
-            vec![json!({
-                "id": 1, "develop": { "B": 2, "C": null }, "rating": 2,
-                "keywordsPresent": ["J"], "keywordsAbsent": ["K"],
-            })]
-        );
-        assert_eq!(
-            states_of(&record, true),
-            vec![json!({
-                "id": 1, "develop": { "B": 3, "C": 4 }, "rating": 4,
-                "keywordsPresent": ["K"], "keywordsAbsent": ["J"],
-            })]
-        );
-        let old = rating_record(json!({ "id": 1, "rating": 2 }));
-        assert!(states_of(&old, true).is_empty());
-        assert_eq!(
             restore_changes(&record)[0],
             json!({
                 "id": 1, "develop": { "B": 2, "C": null }, "rating": 2,
                 "keywordsAdded": ["K"], "keywordsRemoved": ["J"],
+                "expectAfter": {
+                    "develop": { "B": 3, "C": 4 }, "rating": 4,
+                    "keywordsPresent": ["K"], "keywordsAbsent": ["J"],
+                },
             })
         );
+        let old = rating_record(json!({ "id": 1, "rating": 2 }));
+        assert_eq!(restore_changes(&old)[0], json!({ "id": 1, "rating": 2 }));
+    }
+
+    #[test]
+    fn conflict_lines_list_the_differences() {
+        let photo = json!({ "id": 1, "filename": "a.cr3", "conflict": ["A is 0.6, lrcli set 0.5", "rating is 2, lrcli set 3"] });
+        assert_eq!(
+            conflict_line(&photo).unwrap(),
+            "a.cr3 (id 1): skipped: changed since lrcli edited it (A is 0.6, lrcli set 0.5; rating is 2, lrcli set 3). Re-run with --force to restore anyway."
+        );
+        assert!(conflict_line(&json!({ "id": 1, "conflict": [] })).is_none());
     }
 
     #[test]

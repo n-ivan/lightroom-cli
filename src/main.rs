@@ -531,9 +531,7 @@ it switches to Develop, selects each photo in turn, and afterwards restores the
 previous module and selection. It works with Lightroom in the background but
 may take a few seconds per photo, and the screen visibly changes meanwhile. The
 output lists, per photo, the settings that changed. The edits are recorded for
-`lrcli undo` (Lightroom may coalesce them with neighbouring edits on its own
-undo stack; undo verifies the result and falls back to restoring the recorded
-values). --preview and --compare work as in `lrcli apply --help`.
+`lrcli undo`. --preview and --compare work as in `lrcli apply --help`.
 
 Examples:
   lrcli develop auto-tone --photo 149
@@ -620,27 +618,33 @@ produced. `undo` reverts the most recent --steps entries (default 1) that were
 made in the catalog Lightroom has open, newest first, then removes them from the
 history. Entries for other catalogs are skipped.
 
-Lightroom's own undo is used when it can be verified safe: afterwards the photos
-must hold exactly the recorded before-values and the previous lrcli edit must be
-intact, otherwise the undo is reverted. In that case the recorded values are
-restored instead; develop settings that had no value before cannot be cleared
-that way and are reported as warnings. Editing in Lightroom between an lrcli
-write and `lrcli undo` forces this fallback. If a photo or keyword no longer
+`undo` restores the values recorded before the lrcli command, for exactly the
+settings that command changed (only changes are recorded; `lrcli history` shows
+what undo will take back next). It does not use Lightroom's own undo.
+
+A photo that was changed since lrcli edited it (any recorded setting no longer
+holds the value lrcli set) is not touched: undo stops, exits 1 with
+`undo_conflict`, restores no photo of that step and keeps the step in the
+history. --force restores anyway. Develop settings that had no value before
+cannot be cleared and are reported as warnings. If a photo or keyword no longer
 exists, everything else is still restored and the problem is reported per photo.
 Undo steps are not themselves recorded.
 
---dry-run prints what would be restored without changing anything.
+--dry-run prints what would be restored without changing anything and reports
+conflicts of the newest step (later steps depend on the earlier ones being undone).
 
 Examples:
   lrcli undo
   lrcli undo --steps 3 --dry-run
+  lrcli undo --force
 
 JSON output:
   {\"ok\":true,\"dryRun\":false,\"undone\":[{\"time\":\"...\",\"command\":\"lrcli rate 4\",
-    \"changes\":[...],\"method\":\"restore\",\"nativeSkipped\":\"...\",\"photos\":[{\"id\":149,\"filename\":\"IMG_0001.CR3\",\"restored\":[\"rating\"],
-    \"warnings\":[]}]}]}
-  method is \"native\" (Lightroom's undo; no photos list) or \"restore\".
-  With --dry-run: {\"ok\":true,\"dryRun\":true,\"undo\":[{\"time\",\"command\",\"changes\"}]}")]
+    \"changes\":[...],\"photos\":[{\"id\":149,\"filename\":\"IMG_0001.CR3\",\"restored\":[\"rating\"],
+    \"warnings\":[],\"conflict\":[]}]}]}
+  With --dry-run: {\"ok\":true,\"dryRun\":true,\"undo\":[{\"time\",\"command\",\"changes\",
+    \"photos\":[{\"id\",\"filename\",\"conflict\":[\"Exposure2012 is 0.6, lrcli set 0.5\"]}]}]}
+  (\"photos\" only on the first entry). On a conflict the error is `undo_conflict`.")]
     Undo {
         /// Number of recorded edits to undo, newest first
         #[arg(long, value_name = "N", default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
@@ -649,12 +653,17 @@ JSON output:
         /// Show what would be restored without changing anything
         #[arg(long)]
         dry_run: bool,
+
+        /// Restore photos even if they changed since lrcli edited them
+        #[arg(long)]
+        force: bool,
     },
 
     /// List recorded edits (what `lrcli undo` would revert)
     #[command(after_help = "\
 Shows the most recent entries of $LRCLI_HOME/history.jsonl, newest first, for
-every catalog. This does not need Lightroom to be running.
+every catalog. This does not need Lightroom to be running. Only the newest 500
+entries are kept; older ones are dropped when a new edit is recorded.
 
 Examples:
   lrcli history
@@ -1540,8 +1549,12 @@ async fn run(cli: Cli, json: bool) -> u8 {
             };
             output::emit(result, json, output::scalar)
         }
-        Command::Undo { steps, dry_run } => output::emit(
-            edit::undo(&ctx, steps as usize, dry_run).await,
+        Command::Undo {
+            steps,
+            dry_run,
+            force,
+        } => output::emit(
+            edit::undo(&ctx, steps as usize, dry_run, force).await,
             json,
             output::undo,
         ),

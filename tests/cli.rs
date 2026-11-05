@@ -33,6 +33,71 @@ async fn unreachable_error_is_json_in_json_mode() {
 }
 
 #[tokio::test]
+async fn unreachable_errors_show_recent_log_lines_only() {
+    let home = TempDir::new().unwrap();
+    let now = lrcli::log::unix_now();
+    let stamp = lrcli::log::format_timestamp;
+    fs::write(
+        home.path().join("plugin.log"),
+        format!(
+            "{} INFO stale plugin line\n{} ERROR fresh plugin line\n",
+            stamp(now - 3600),
+            stamp(now - 30)
+        ),
+    )
+    .unwrap();
+    fs::write(
+        home.path().join("broker.log"),
+        format!(
+            "{} stale broker line\n{} fresh broker line\n",
+            lrcli::log::format_timestamp(now - 3600),
+            lrcli::log::format_timestamp(now - 30)
+        ),
+    )
+    .unwrap();
+
+    let human = run(home.path(), &["status"]).await;
+    assert_eq!(human.code, 3);
+    assert!(
+        human.stderr.contains("Recent plugin log:"),
+        "{}",
+        human.stderr
+    );
+    assert!(
+        human.stderr.contains("fresh plugin line"),
+        "{}",
+        human.stderr
+    );
+    assert!(
+        human.stderr.contains("Recent broker log:"),
+        "{}",
+        human.stderr
+    );
+    assert!(
+        human.stderr.contains("fresh broker line"),
+        "{}",
+        human.stderr
+    );
+    assert!(!human.stderr.contains("stale"), "{}", human.stderr);
+
+    let json = run(home.path(), &["--json", "status"]).await.json();
+    let plugin = json["diagnostics"]["plugin"].as_array().unwrap();
+    assert_eq!(plugin.len(), 1);
+    assert!(plugin[0].as_str().unwrap().contains("fresh plugin line"));
+    let broker = json["diagnostics"]["broker"].as_array().unwrap();
+    assert!(
+        broker
+            .iter()
+            .all(|l| !l.as_str().unwrap().contains("stale"))
+    );
+    assert!(
+        broker
+            .iter()
+            .any(|l| l.as_str().unwrap().contains("fresh broker line"))
+    );
+}
+
+#[tokio::test]
 async fn usage_errors_exit_2() {
     let home = TempDir::new().unwrap();
     let out = run(home.path(), &["bogus"]).await;

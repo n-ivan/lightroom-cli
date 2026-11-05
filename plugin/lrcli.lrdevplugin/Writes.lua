@@ -538,6 +538,51 @@ function Writes.plain(value)
   return copy
 end
 
+local TOLERANCE = 1e-6
+
+local function sameValue(a, b)
+  if type(a) == 'number' and type(b) == 'number' then
+    return math.abs(a - b) <= TOLERANCE
+  end
+  if type(a) ~= 'table' or type(b) ~= 'table' then
+    return a == b
+  end
+  for k, v in pairs(a) do
+    if not sameValue(v, b[k]) then
+      return false
+    end
+  end
+  for k in pairs(b) do
+    if a[k] == nil then
+      return false
+    end
+  end
+  return true
+end
+
+local function parseExpectation(raw)
+  if not isObject(raw) then
+    badRequest('"expectAfter" must be an object.')
+  end
+  local item = { keywordsPresent = stringList(raw, 'keywordsPresent'), keywordsAbsent = stringList(raw, 'keywordsAbsent') }
+  if raw.develop ~= nil then
+    if not isObject(raw.develop) then
+      badRequest('"expectAfter.develop" must be an object.')
+    end
+    item.develop = raw.develop
+  end
+  if raw.rating ~= nil then
+    item.rating = Writes.parseRating(raw)
+  end
+  if raw.flag ~= nil then
+    item.flag = Writes.parseFlag(raw)
+  end
+  if raw.label ~= nil then
+    item.label = Writes.parseLabel(raw)
+  end
+  return item
+end
+
 -- Before-values were read from getDevelopSettings, so they are restored as-is
 -- (including table values such as Look) instead of being validated like input.
 function Writes.parseRestore(args)
@@ -575,77 +620,12 @@ function Writes.parseRestore(args)
     if raw.label ~= nil then
       change.label = Writes.parseLabel(raw)
     end
+    if raw.expectAfter ~= nil and raw.expectAfter ~= json.null then
+      change.expectAfter = parseExpectation(raw.expectAfter)
+    end
     changes[i] = change
   end
   return changes
-end
-
-local TOLERANCE = 1e-6
-
-local function sameValue(a, b)
-  if type(a) == 'number' and type(b) == 'number' then
-    return math.abs(a - b) <= TOLERANCE
-  end
-  if type(a) ~= 'table' or type(b) ~= 'table' then
-    return a == b
-  end
-  for k, v in pairs(a) do
-    if not sameValue(v, b[k]) then
-      return false
-    end
-  end
-  for k in pairs(b) do
-    if a[k] == nil then
-      return false
-    end
-  end
-  return true
-end
-
-local function parseExpectation(raw)
-  if not isObject(raw) or not isInteger(raw.id) then
-    badRequest('Every expectation needs an integer "id".')
-  end
-  local item = { id = raw.id, keywordsPresent = stringList(raw, 'keywordsPresent'), keywordsAbsent = stringList(raw, 'keywordsAbsent') }
-  if raw.develop ~= nil then
-    if not isObject(raw.develop) then
-      badRequest('"develop" must be an object.')
-    end
-    item.develop = raw.develop
-  end
-  if raw.rating ~= nil then
-    item.rating = Writes.parseRating(raw)
-  end
-  if raw.flag ~= nil then
-    item.flag = Writes.parseFlag(raw)
-  end
-  if raw.label ~= nil then
-    item.label = Writes.parseLabel(raw)
-  end
-  return item
-end
-
-local function expectationList(args, name)
-  local list = args[name]
-  if list == nil or list == json.null then
-    return {}
-  end
-  if type(list) ~= 'table' then
-    badRequest('"' .. name .. '" must be an array.')
-  end
-  local out = {}
-  for i, raw in ipairs(list) do
-    out[i] = parseExpectation(raw)
-  end
-  return out
-end
-
-function Writes.parseUndoNative(args)
-  local expect = expectationList(args, 'expect')
-  if #expect == 0 then
-    badRequest('"expect" must be a non-empty array.')
-  end
-  return { expect = expect, keep = expectationList(args, 'keep') }
 end
 
 -- Reads only the fields `expected` asks about, so photos are not queried for
@@ -683,10 +663,9 @@ local function show(value)
   return tostring(value)
 end
 
--- Returns a description of the first difference between `state` and what
--- `expected` says it should be, or nil when they agree.
-function Writes.mismatch(state, expected)
-  local prefix = 'photo ' .. expected.id .. ': '
+-- Describes every field of `state` that differs from what lrcli left behind.
+function Writes.conflicts(state, expected)
+  local found = {}
   if expected.develop then
     for _, key in ipairs(sortedKeys(expected.develop)) do
       local want = expected.develop[key]
@@ -694,26 +673,26 @@ function Writes.mismatch(state, expected)
         want = nil
       end
       if not sameValue(state.develop[key], want) then
-        return prefix .. key .. ' is ' .. show(state.develop[key]) .. ', expected ' .. show(want)
+        found[#found + 1] = key .. ' is ' .. show(state.develop[key]) .. ', lrcli set ' .. show(want)
       end
     end
   end
   for _, field in ipairs({ 'rating', 'flag', 'label' }) do
     if expected[field] ~= nil and state[field] ~= expected[field] then
-      return prefix .. field .. ' is ' .. show(state[field]) .. ', expected ' .. show(expected[field])
+      found[#found + 1] = field .. ' is ' .. show(state[field]) .. ', lrcli set ' .. show(expected[field])
     end
   end
   for _, path in ipairs(expected.keywordsPresent) do
     if not state.keywordPaths[path:lower()] then
-      return prefix .. 'keyword "' .. path .. '" is missing'
+      found[#found + 1] = 'keyword "' .. path .. '" is gone, lrcli added it'
     end
   end
   for _, path in ipairs(expected.keywordsAbsent) do
     if state.keywordPaths[path:lower()] then
-      return prefix .. 'keyword "' .. path .. '" is still present'
+      found[#found + 1] = 'keyword "' .. path .. '" is back, lrcli removed it'
     end
   end
-  return nil
+  return found
 end
 
 return Writes
