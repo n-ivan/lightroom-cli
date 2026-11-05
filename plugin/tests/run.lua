@@ -9,6 +9,7 @@ local SearchCriteria = require 'SearchCriteria'
 local Targets = require 'Targets'
 local Preview = require 'Preview'
 local Writes = require 'Writes'
+local DevelopActions = require 'DevelopActions'
 
 local passed, failed = 0, 0
 
@@ -1142,6 +1143,26 @@ test('settings: panels without applicable keys are dropped and arrays encode as 
   local out = PanelSettings.listing({ testPanels[1] }, { raw = {}, nonRaw = {} }, nil, nil)
   eq(#out, 0)
   eq(json.encode(out), '[]')
+end)
+
+test('develop actions: parse validates actions and reset keys', function()
+  local parsed = DevelopActions.parse({ actions = { { action = 'auto-tone' }, { action = 'reset', keys = { 'Exposure2012' } } } })
+  eq(#parsed, 2)
+  eq(parsed[2].keys[1], 'Exposure2012')
+  badRequest(DevelopActions.parse, {})
+  badRequest(DevelopActions.parse, { actions = {} })
+  badRequest(DevelopActions.parse, { actions = { { action = 'sharpen' } } })
+  badRequest(DevelopActions.parse, { actions = { { action = 'reset' } } })
+  badRequest(DevelopActions.parse, { actions = { { action = 'reset', keys = { '' } } } })
+  badRequest(DevelopActions.parse, { actions = { { action = 'auto-wb', keys = { 'Tint' } } } })
+end)
+
+test('develop actions: module names and controller name fallback', function()
+  eq(DevelopActions.parseModule({ name = 'develop' }), 'develop')
+  badRequest(DevelopActions.parseModule, { name = 'Develop' })
+  badRequest(DevelopActions.parseModule, {})
+  eq(DevelopActions.alternateName('Exposure2012'), 'Exposure')
+  eq(DevelopActions.alternateName('Tint'), nil)
 end)
 
 test('Version matches Info.lua', function()

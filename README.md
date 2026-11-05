@@ -91,6 +91,8 @@ lrcli apply --photo 42 Exposure2012+=0.5 --compare             # before/after im
 lrcli compare before.jpg after.jpg [--out PATH]                # side-by-side JPEG of two images, plus stats
 lrcli presets                                                  # develop presets by folder
 lrcli preset "Warm Contrast" --amount 60 --photo 42            # apply a develop preset
+lrcli develop auto-tone auto-wb --photo 42                     # Develop actions: also as-shot-wb, reset-all, --reset KEY,...
+lrcli module develop                                           # switch Lightroom module (library, develop, map, ...)
 lrcli tag add "Places > Paris" portrait --photo 42             # add keywords (tag remove to remove)
 lrcli rate 4 --photo 42                                        # stars; also flag picked|rejected|none, label red|...|none
 lrcli undo                                                     # revert the last recorded edit (--steps N, --dry-run)
@@ -110,16 +112,22 @@ acts on the current selection. `preview` writes JPEGs under
 `~/.lrcli/previews/` and prints their paths with luminance and clipping stats;
 `--fast` uses Lightroom's cached preview, which can be stale after edits. Run `lrcli <command> --help` for all options.
 
-Editing commands (`apply`, `preset`, `tag`, `rate`, `flag`, `label`) take the same
+Editing commands (`apply`, `preset`, `develop`, `tag`, `rate`, `flag`, `label`) take the same
 `--photo`/`--photos -` targets and default to the current selection. Each writes
 all its photos in one step, which shows up in Lightroom's Edit > Undo menu, and
 records the replaced values in `~/.lrcli/history.jsonl` so `lrcli undo` can
 restore them (for the catalog that is open).
 
+`develop` runs Lightroom's own Develop actions (auto tone, auto white balance,
+as-shot white balance, resets). Lightroom only runs them in the Develop module,
+so the command switches to Develop, selects each photo in turn, and afterwards
+restores the previous module and selection. It works with Lightroom in the
+background and records the changes for `undo` like the other edits.
+
 `settings` lists the develop setting names `apply` accepts, grouped by panel,
 with valid ranges (for a given `--photo`: that photo's ranges and current
 values; non-raw files use `IncrementalTemperature`/`IncrementalTint` instead of
-`Temperature`/`Tint`). `--compare` on `apply` and `preset` renders a preview
+`Temperature`/`Tint`). `--compare` on `apply`, `preset` and `develop` renders a preview
 before and after the write and saves a side-by-side image per photo (left =
 before, right = after) next to the after preview, with mean luminance and
 clipping before and after. `compare` does the same for two existing JPEGs.

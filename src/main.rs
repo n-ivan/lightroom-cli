@@ -462,6 +462,54 @@ JSON output:
      \"before\":{\"Vibrance\":0},\"after\":{\"Vibrance\":30}}]}")]
     Preset(Box<PresetArgs>),
 
+    /// Run Lightroom's Develop actions (auto tone, auto white balance, resets)
+    #[command(after_help = "\
+ACTION is one or more of auto-tone, auto-wb (auto white balance), as-shot-wb
+(back to the camera's white balance) and reset-all (every develop adjustment);
+they run in the order given. --reset KEY resets single adjustments to their
+defaults (repeat it or separate keys with commas, e.g. --reset Exposure2012,Tint)
+and runs after the ACTIONs. At least one action or --reset is required. Without
+--photo or --photos, acts on Lightroom's current selection.
+
+Lightroom has to be in the Develop module for these to work, so while this runs
+it switches to Develop, selects each photo in turn, and afterwards restores the
+previous module and selection. It works with Lightroom in the background but
+may take a few seconds per photo, and the screen visibly changes meanwhile. The
+output lists, per photo, the settings that changed. The edits are recorded for
+`lrcli undo` (Lightroom may coalesce them with neighbouring edits on its own
+undo stack; undo verifies the result and falls back to restoring the recorded
+values). --preview and --compare work as in `lrcli apply --help`.
+
+Examples:
+  lrcli develop auto-tone --photo 149
+  lrcli develop auto-wb auto-tone --compare
+  lrcli develop as-shot-wb --photos -
+  lrcli develop --reset Exposure2012,Contrast2012 --photo 149
+  lrcli develop reset-all --photo 149
+
+JSON output:
+  {\"ok\":true,\"target\":\"ids\",\"photos\":[{\"id\":149,\"filename\":\"IMG_0001.CR3\",
+    \"before\":{\"Exposure2012\":0.0},\"after\":{\"Exposure2012\":0.4}}]}
+  A photo that failed has \"error\" instead; one that changed nothing has empty
+  before and after.")]
+    Develop(Box<DevelopArgs>),
+
+    /// Switch Lightroom to a module (library, develop, map, ...)
+    #[command(after_help = "\
+NAME is one of library, develop, map, book, slideshow, print, web.
+
+Examples:
+  lrcli module develop
+  lrcli module library
+
+JSON output:
+  {\"ok\":true,\"previous\":\"library\",\"current\":\"develop\"}")]
+    Module {
+        /// Module name
+        #[arg(value_name = "NAME", value_parser = ["library", "develop", "map", "book", "slideshow", "print", "web"])]
+        name: String,
+    },
+
     /// Add or remove keywords on photos
     #[command(subcommand)]
     Tag(TagCommand),
@@ -511,7 +559,7 @@ JSON output:
 
     /// Undo the last recorded lrcli edits
     #[command(after_help = "\
-Every successful apply, preset, tag, rate, flag and label is recorded in
+Every successful apply, preset, develop, tag, rate, flag and label is recorded in
 $LRCLI_HOME/history.jsonl together with the values it replaced and the values it
 produced. `undo` reverts the most recent --steps entries (default 1) that were
 made in the catalog Lightroom has open, newest first, then removes them from the
@@ -720,6 +768,28 @@ struct PresetArgs {
     /// Preset strength, 0 to 200
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(0..=200))]
     amount: Option<u32>,
+
+    /// After writing, render a preview of the edited photos
+    #[arg(long)]
+    preview: bool,
+
+    /// Render before and after previews and save a side-by-side image (left = before, right = after)
+    #[arg(long)]
+    compare: bool,
+}
+
+#[derive(Args)]
+struct DevelopArgs {
+    /// auto-tone, auto-wb, as-shot-wb or reset-all (run in order)
+    #[arg(value_name = "ACTION", value_parser = ["auto-tone", "auto-wb", "as-shot-wb", "reset-all"])]
+    actions: Vec<String>,
+
+    /// Reset a develop setting to its default (repeatable, or comma-separated)
+    #[arg(long = "reset", value_name = "KEY", value_delimiter = ',')]
+    reset: Vec<String>,
+
+    #[command(flatten)]
+    target: TargetArgs,
 
     /// After writing, render a preview of the edited photos
     #[arg(long)]
@@ -1066,6 +1136,28 @@ async fn run(cli: Cli, json: bool) -> u8 {
             };
             output::emit(result, json, output::preset)
         }
+        Command::Develop(args) => {
+            let run = write_run(&command_line, args.preview, args.compare, cli.timeout);
+            let result = match (
+                args.target.ids(),
+                edit::develop_actions(&args.actions, &args.reset),
+            ) {
+                (Ok(ids), Ok(actions)) => {
+                    ctx.timeout = cli.timeout.map_or_else(
+                        || preview::default_timeout(ids.as_deref()),
+                        Duration::from_secs_f64,
+                    );
+                    edit::develop(&ctx, &run, ids.as_deref(), actions).await
+                }
+                (Err(e), _) | (_, Err(e)) => Err(e),
+            };
+            output::emit(result, json, output::apply)
+        }
+        Command::Module { name } => output::emit(
+            commands::photos::module(&ctx, &name).await,
+            json,
+            output::module,
+        ),
         Command::Tag(tag) => {
             let run = write_run(&command_line, false, false, cli.timeout);
             let (target, add, remove) = match tag {

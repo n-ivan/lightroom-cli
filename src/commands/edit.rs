@@ -351,6 +351,40 @@ pub async fn preset(
     Ok(reply)
 }
 
+/// Builds the plugin's action list: the positional actions in order, then one
+/// `reset` action for all `--reset` keys.
+pub fn develop_actions(actions: &[String], reset: &[String]) -> Result<Vec<Value>, Error> {
+    let mut list: Vec<Value> = actions.iter().map(|a| json!({ "action": a })).collect();
+    if !reset.is_empty() {
+        if let Some(blank) = reset.iter().find(|key| key.trim().is_empty()) {
+            return Err(Error::usage(format!(
+                "--reset needs develop setting names, got {blank:?}."
+            )));
+        }
+        list.push(json!({ "action": "reset", "keys": reset }));
+    }
+    if list.is_empty() {
+        return Err(Error::usage(
+            "Give at least one ACTION (auto-tone, auto-wb, as-shot-wb, reset-all) or --reset KEY. See `lrcli develop --help`.",
+        ));
+    }
+    Ok(list)
+}
+
+pub async fn develop(
+    ctx: &Context,
+    run: &Run<'_>,
+    ids: Option<&[i64]>,
+    actions: Vec<Value>,
+) -> Result<Value, Error> {
+    let mut args = targets(ids);
+    args.insert("actions".into(), Value::Array(actions));
+    let before = render_before(ctx, run, ids).await;
+    let mut reply = write(ctx, run, "develop", args, develop_changes).await?;
+    attach_previews(ctx, run, &mut reply, before).await;
+    Ok(reply)
+}
+
 pub async fn tag(
     ctx: &Context,
     run: &Run<'_>,

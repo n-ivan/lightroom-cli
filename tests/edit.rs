@@ -313,6 +313,119 @@ async fn preset_sends_name_or_uuid_and_amount() {
 }
 
 #[tokio::test]
+async fn develop_sends_actions_in_order_and_records_changes() {
+    let (plugin, _broker) = start_broker(Options::default()).await;
+    plugin.canned(
+        "develop",
+        json!({ "target": "ids", "photos": [
+            { "id": 149, "filename": "a.cr3", "before": { "Exposure2012": 0, "Tint": null }, "after": { "Exposure2012": 0.4, "Tint": 3 } },
+            { "id": 150, "filename": "b.cr3", "before": {}, "after": {} },
+        ]}),
+    );
+    let out = run(
+        plugin.home(),
+        &[
+            "develop",
+            "auto-wb",
+            "auto-tone",
+            "--reset",
+            "Exposure2012,Tint",
+            "--reset",
+            "Contrast2012",
+            "--photo",
+            "149",
+        ],
+    )
+    .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(
+        plugin.last_args("develop"),
+        json!({ "photos": [149], "actions": [
+            { "action": "auto-wb" },
+            { "action": "auto-tone" },
+            { "action": "reset", "keys": ["Exposure2012", "Tint", "Contrast2012"] },
+        ]})
+    );
+    assert!(
+        out.stdout.contains("Exposure2012: 0 → 0.4"),
+        "{}",
+        out.stdout
+    );
+    assert!(out.stdout.contains("(no changes)"), "{}", out.stdout);
+    assert_eq!(
+        history(&plugin)[0]["changes"],
+        json!([{
+            "id": 149,
+            "develop": { "Exposure2012": 0, "Tint": null },
+            "developAfter": { "Exposure2012": 0.4, "Tint": 3 },
+        }])
+    );
+}
+
+#[tokio::test]
+async fn develop_needs_an_action() {
+    let (plugin, _broker) = start_broker(Options::default()).await;
+    let out = run(plugin.home(), &["develop", "--photo", "149"]).await;
+    assert_eq!(out.code, 2, "{}", out.stderr);
+    let out = run(plugin.home(), &["develop", "sharpen"]).await;
+    assert_eq!(out.code, 2, "{}", out.stderr);
+    assert!(
+        plugin
+            .stats
+            .commands
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|c| c != "develop")
+    );
+}
+
+#[tokio::test]
+async fn develop_compare_renders_around_the_write() {
+    let (plugin, _broker) = start_broker(Options::default()).await;
+    compare_fixtures(&plugin);
+    plugin.canned(
+        "develop",
+        json!({ "photos": [
+            { "id": 149, "filename": "a.cr3", "before": { "Tint": 1 }, "after": { "Tint": 2 } },
+        ]}),
+    );
+    let out = run(
+        plugin.home(),
+        &[
+            "--json",
+            "develop",
+            "auto-tone",
+            "--photo",
+            "149",
+            "--compare",
+        ],
+    )
+    .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(
+        write_and_preview_order(&plugin),
+        ["preview", "develop", "preview"]
+    );
+    assert!(out.json()["photos"][0]["compare"]["file"].is_string());
+}
+
+#[tokio::test]
+async fn module_switches_and_reports_the_previous_module() {
+    let (plugin, _broker) = start_broker(Options::default()).await;
+    plugin.canned(
+        "module",
+        json!({ "previous": "library", "current": "develop" }),
+    );
+    let out = run(plugin.home(), &["module", "develop"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, "Switched to develop (was library)\n");
+    assert_eq!(plugin.last_args("module"), json!({ "name": "develop" }));
+    let out = run(plugin.home(), &["module", "nope"]).await;
+    assert_eq!(out.code, 2, "{}", out.stderr);
+}
+
+#[tokio::test]
 async fn tag_sends_keywords_and_records_changes() {
     let (plugin, _broker) = start_broker(Options::default()).await;
     plugin.canned(
@@ -650,7 +763,7 @@ fn write_and_preview_order(plugin: &FakePlugin) -> Vec<String> {
         .lock()
         .unwrap()
         .iter()
-        .filter(|c| matches!(c.as_str(), "preview" | "apply" | "preset"))
+        .filter(|c| matches!(c.as_str(), "preview" | "apply" | "preset" | "develop"))
         .cloned()
         .collect()
 }

@@ -230,6 +230,13 @@ pub async fn select(ctx: &Context, photos: &[i64]) -> Result<Value, Error> {
         .await
 }
 
+pub async fn module(ctx: &Context, name: &str) -> Result<Value, Error> {
+    ctx.connect()
+        .await?
+        .request("module", json!({ "name": name }))
+        .await
+}
+
 pub async fn selection(ctx: &Context, ids: bool) -> Result<Value, Error> {
     let reply = ctx.connect().await?.request("selection", json!({})).await?;
     Ok(if ids { ids_only(&reply) } else { reply })

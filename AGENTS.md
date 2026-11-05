@@ -24,6 +24,9 @@ Lightroom.
   tree lookup, preset lookup, the write-gate wrapper. `WriteHandlers.lua`: the
   catalog write commands (`apply`, `presets`, `preset`, `tag`, `rate`, `flag`,
   `label`, `restore`); merged in by `Handlers.lua`.
+- `DevelopHandlers.lua`: the `develop` and `module` commands (drive
+  `LrDevelopController` in the Develop module); `DevelopActions.lua` (pure):
+  their argument validation.
 - `DevelopRanges.lua`: GENERATED min/max per develop key, `raw` and `nonRaw`;
   never edit it. Regenerate: run `lrcli raw develop_ranges '{"photos":[<id>]}'`
   on a raw photo and on a non-raw one (e.g. TIFF), save the JSON replies to
@@ -111,6 +114,18 @@ counts as unsupported unless verified live.
   the recorded before-state (absent keys must be nil) and the previous lrcli
   step's after-state, and redoes if either differs; `lrcli undo` then falls
   back to `restore`, which cannot clear keys that had no value before.
+- `LrDevelopController` acts on the current photo and only in the Develop
+  module, so `develop` selects each photo (`setSelectedPhotos`), switches module
+  (1 s sleep, 0.3 s per photo once there) and restores module and selection
+  afterwards; no write gate is needed. "As shot" white balance has no
+  controller call: `resetToDefault('Temperature')` and `('Tint')` restore the
+  camera values but leave the label on Custom, `setValue('WhiteBalance',
+  'As Shot')` does nothing, so a gate applies `WhiteBalance = 'As Shot'`.
+- Controller changes show up in `getDevelopSettings` a moment late, so
+  `develop` polls (0.1 s, up to 2 s) until they differ from the before-snapshot;
+  an action can legitimately change nothing. Controller edits sit on
+  Lightroom's undo stack and coalesce like any others, so their history entries
+  rely on the verified `undo_native` check and the `restore` fallback.
 - Decoded JSON arrays carry json.lua's marker metatable and must reach the SDK
   as plain tables (`Writes.plain`); otherwise `withWriteAccessDo` hangs on commit.
 - `LR_jpeg_quality` is 0..1, not 0..100. `LR_size_resizeType = 'longEdge'` is

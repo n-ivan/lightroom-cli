@@ -467,11 +467,18 @@ fn develop_block(photo: &Value) -> String {
         let before = photo
             .pointer(&format!("/before/{key}"))
             .unwrap_or(&Value::Null);
-        let mut line = format!(
-            "  {key}: {} → {}",
-            display_value(before),
-            display_value(after)
-        );
+        // Table values such as Look (the profile) run to hundreds of characters;
+        // --json carries them in full.
+        let mut line =
+            if before.is_object() || after.is_object() || before.is_array() || after.is_array() {
+                format!("  {key}: (changed; see --json)")
+            } else {
+                format!(
+                    "  {key}: {} → {}",
+                    display_value(before),
+                    display_value(after)
+                )
+            };
         if let Some(requested) = photo.pointer(&format!("/requested/{key}"))
             && differs_from_requested(after, requested)
         {
@@ -532,6 +539,15 @@ pub fn preset(value: &Value) -> String {
     lines.extend(photos_of(value).iter().map(develop_block));
     write_footer(value, &mut lines);
     lines.join("\n")
+}
+
+pub fn module(value: &Value) -> String {
+    let current = text(value, "/current");
+    match str_at(value, "previous") {
+        Some(previous) if previous == current => format!("Already in {current}"),
+        Some(previous) => format!("Switched to {current} (was {previous})"),
+        None => format!("Switched to {current}"),
+    }
 }
 
 pub fn scalar(value: &Value) -> String {
