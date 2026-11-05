@@ -5,12 +5,13 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::error::ErrorKind;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use serde_json::json;
 
 use lrcli::broker;
 use lrcli::commands::edit::{self, Run};
+use lrcli::commands::export::{self, ExportOptions, Size};
 use lrcli::commands::photos::{self, Rating, SearchOptions};
 use lrcli::commands::preview::{self, PreviewOptions};
 use lrcli::commands::{self, Context};
@@ -62,7 +63,7 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
-    /// Seconds to wait for each request to be answered [default: 30; `preview` scales with the batch]
+    /// Seconds to wait for each request to be answered [default: 30; `preview` and `export` scale with the batch]
     #[arg(long, global = true, value_name = "SECS", value_parser = parse_secs)]
     timeout: Option<f64>,
 
@@ -383,6 +384,60 @@ JSON output:
   A photo that failed has \"file\":null and an \"error\" message. \"histograms\"
   is added under \"stats\" with --histogram.")]
     Preview(Box<PreviewArgs>),
+
+    /// Export photos to image files (JPEG, TIFF, PSD, DNG or the original) in a folder
+    #[command(after_help = "\
+Exports each photo through Lightroom's own export, with its current edits, into
+the folder given by --dest (created if missing; relative paths are resolved
+against the current directory). Without --photo or --photos, acts on
+Lightroom's current selection (at most 500 photos per call). Videos are not
+exported: they get an error of their own.
+
+Defaults: JPEG, quality 90, full size, sRGB, all metadata, file name
+{{image_name}}, existing files renamed (never overwritten). Quality applies to
+JPEG only; --bit-depth to TIFF and PSD; --tiff-compression to TIFF. The size
+options are mutually exclusive and never enlarge a photo; --size WxH fits the
+photo inside that box. Sharpening is for the output media given by --sharpen
+(--sharpen-amount defaults to standard).
+
+--on-conflict decides what happens when a file already exists: rename (the
+default, Lightroom adds -2, -3, ...), overwrite, or skip (the photo is then
+reported without a file). Lightroom's dialog is never shown.
+
+--name is Lightroom's file name template. Common tokens:
+  {{image_name}}                       file name without extension (default)
+  {{image_originalName}}               original file name
+  {{image_folder}}                     name of the photo's folder
+  {{copy_name}}                        virtual copy name
+  {{date_YYYYMMDD}}                    capture date, also {{date_YYYY}}, {{date_MM}}, {{date_DD}}
+  {{naming_sequenceNumber_3Digits}}    001, 002, ... (also 1Digit to 5Digits)
+  {{naming_operationSequence_3Digits}} image number within this export
+  {{com.adobe.title}}                  title (other metadata tokens work too)
+The extension is added by Lightroom, in lowercase. {{custom_token}} is not
+supported. --subfolder puts the files in a subfolder of --dest.
+
+--add-to-catalog imports the exported files into the catalog. That changes the
+catalog and cannot be undone with `lrcli undo`.
+
+The request timeout defaults to 60 s plus 10 s per photo (300 s for the
+selection); --timeout overrides it. A photo that fails is reported on its own
+line and does not stop the others. Exit 0 if at least one photo was exported;
+exit 1 if every photo failed.
+
+Examples:
+  lrcli export --photo 149 --dest ~/Exports
+  lrcli export --photo 149 --photo 150 --dest ~/Exports/web --long-edge 2048 --quality 85
+  lrcli export --dest ~/Exports/print --format tiff --bit-depth 16 --color-space adobergb --tiff-compression zip
+  lrcli export --photo 149 --dest ~/Exports --size 1920x1080 --sharpen screen --remove-location
+  lrcli export --photo 149 --dest ~/Exports --name '{{date_YYYYMMDD}}-{{naming_sequenceNumber_3Digits}}'
+  lrcli search --flag picked --ids | lrcli export --photos - --dest ~/Exports/picks
+
+JSON output:
+  {\"ok\":true,\"target\":\"ids\",\"dest\":\"/Users/me/Exports\",
+   \"photos\":[{\"id\":149,\"filename\":\"IMG_0001.CR3\",
+     \"file\":\"/Users/me/Exports/IMG_0001.jpg\",\"bytes\":3355443,\"error\":null}]}
+  A photo that failed has \"file\":null and an \"error\" message.")]
+    Export(Box<ExportArgs>),
 
     /// Change develop settings (sliders) on photos
     #[command(after_help = "\
@@ -927,6 +982,281 @@ struct PreviewArgs {
     no_stats: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, ValueEnum)]
+enum FormatArg {
+    Jpeg,
+    Tiff,
+    Psd,
+    Dng,
+    Original,
+}
+
+impl FormatArg {
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Jpeg => "JPEG",
+            Self::Tiff => "TIFF",
+            Self::Psd => "PSD",
+            Self::Dng => "DNG",
+            Self::Original => "ORIGINAL",
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ColorSpaceArg {
+    Srgb,
+    Adobergb,
+    Prophoto,
+}
+
+impl ColorSpaceArg {
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Srgb => "sRGB",
+            Self::Adobergb => "AdobeRGB",
+            Self::Prophoto => "ProPhotoRGB",
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum TiffCompressionArg {
+    None,
+    Lzw,
+    Zip,
+}
+
+impl TiffCompressionArg {
+    fn wire(self) -> &'static str {
+        match self {
+            Self::None => "compressionMethod_None",
+            Self::Lzw => "compressionMethod_LZW",
+            Self::Zip => "compressionMethod_ZIP",
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum SharpenArg {
+    Screen,
+    Matte,
+    Glossy,
+}
+
+impl SharpenArg {
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Screen => "screen",
+            Self::Matte => "matte",
+            Self::Glossy => "glossy",
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum SharpenAmountArg {
+    Low,
+    Standard,
+    High,
+}
+
+impl SharpenAmountArg {
+    fn level(self) -> u8 {
+        match self {
+            Self::Low => 1,
+            Self::Standard => 2,
+            Self::High => 3,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum MetadataArg {
+    All,
+    Copyright,
+    CopyrightContact,
+    AllExceptCamera,
+}
+
+impl MetadataArg {
+    fn wire(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Copyright => "copyrightOnly",
+            Self::CopyrightContact => "copyrightAndContactOnly",
+            Self::AllExceptCamera => "allExceptCameraInfo",
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ConflictArg {
+    Rename,
+    Overwrite,
+    Skip,
+}
+
+impl ConflictArg {
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Rename => "rename",
+            Self::Overwrite => "overwrite",
+            Self::Skip => "skip",
+        }
+    }
+}
+
+#[derive(Args)]
+#[group(multiple = false)]
+struct SizeArgs {
+    /// Scale so the long edge is at most this many pixels
+    #[arg(long, value_name = "PX", value_parser = clap::value_parser!(u32).range(1..=i64::from(export::MAX_PIXELS)))]
+    long_edge: Option<u32>,
+
+    /// Scale so the short edge is at most this many pixels
+    #[arg(long, value_name = "PX", value_parser = clap::value_parser!(u32).range(1..=i64::from(export::MAX_PIXELS)))]
+    short_edge: Option<u32>,
+
+    /// Fit inside a box of this width and height in pixels, e.g. 1920x1080
+    #[arg(long, value_name = "WxH", value_parser = parse_dimensions)]
+    size: Option<(u32, u32)>,
+
+    /// Scale to this many megapixels
+    #[arg(long, value_name = "N", value_parser = parse_megapixels)]
+    megapixels: Option<f64>,
+}
+
+#[derive(Args)]
+struct ExportArgs {
+    #[command(flatten)]
+    target: TargetArgs,
+
+    /// Folder to export into (created if missing)
+    #[arg(long, value_name = "DIR")]
+    dest: PathBuf,
+
+    /// File format [default: jpeg]
+    #[arg(long, value_enum)]
+    format: Option<FormatArg>,
+
+    /// JPEG quality, 0 to 100 (jpeg only) [default: 90]
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(0..=100))]
+    quality: Option<u8>,
+
+    #[command(flatten)]
+    size: SizeArgs,
+
+    /// Color space
+    #[arg(long, value_enum, default_value = "srgb")]
+    color_space: ColorSpaceArg,
+
+    /// Bit depth (tiff and psd only)
+    #[arg(long, value_name = "BITS", value_parser = ["8", "16"])]
+    bit_depth: Option<String>,
+
+    /// TIFF compression (tiff only)
+    #[arg(long, value_enum)]
+    tiff_compression: Option<TiffCompressionArg>,
+
+    /// Sharpen for this output media
+    #[arg(long, value_enum)]
+    sharpen: Option<SharpenArg>,
+
+    /// Sharpening amount
+    #[arg(long, value_enum, default_value = "standard", requires = "sharpen")]
+    sharpen_amount: SharpenAmountArg,
+
+    /// Metadata to embed
+    #[arg(long, value_enum, default_value = "all")]
+    metadata: MetadataArg,
+
+    /// Strip GPS location from the exported files
+    #[arg(long)]
+    remove_location: bool,
+
+    /// File name template, see the tokens below
+    #[arg(long, value_name = "TEMPLATE", default_value = export::DEFAULT_NAME)]
+    name: String,
+
+    /// What to do when a file already exists
+    #[arg(long, value_enum, default_value = "rename")]
+    on_conflict: ConflictArg,
+
+    /// Put the files in this subfolder of --dest
+    #[arg(long, value_name = "NAME")]
+    subfolder: Option<String>,
+
+    /// Import the exported files into the catalog (changes the catalog; not undoable)
+    #[arg(long)]
+    add_to_catalog: bool,
+}
+
+impl ExportArgs {
+    fn options(&self, ids: Option<Vec<i64>>) -> Result<ExportOptions, Error> {
+        let format = self.format.unwrap_or(FormatArg::Jpeg);
+        if self.quality.is_some() && format != FormatArg::Jpeg {
+            return Err(Error::usage("--quality applies only to --format jpeg."));
+        }
+        let deep = matches!(format, FormatArg::Tiff | FormatArg::Psd);
+        if self.bit_depth.is_some() && !deep {
+            return Err(Error::usage(
+                "--bit-depth applies only to --format tiff or psd.",
+            ));
+        }
+        if self.tiff_compression.is_some() && format != FormatArg::Tiff {
+            return Err(Error::usage(
+                "--tiff-compression applies only to --format tiff.",
+            ));
+        }
+        let size = &self.size;
+        Ok(ExportOptions {
+            ids,
+            dest: self.dest.clone(),
+            format: format.wire(),
+            quality: (format == FormatArg::Jpeg)
+                .then(|| self.quality.unwrap_or(export::DEFAULT_QUALITY)),
+            size: size
+                .long_edge
+                .map(Size::LongEdge)
+                .or(size.short_edge.map(Size::ShortEdge))
+                .or(size.size.map(|(w, h)| Size::Dimensions(w, h)))
+                .or(size.megapixels.map(Size::Megapixels)),
+            color_space: self.color_space.wire(),
+            bit_depth: self.bit_depth.as_deref().and_then(|bits| bits.parse().ok()),
+            tiff_compression: self.tiff_compression.map(TiffCompressionArg::wire),
+            sharpen: self
+                .sharpen
+                .map(|media| (media.wire(), self.sharpen_amount.level())),
+            metadata: self.metadata.wire(),
+            remove_location: self.remove_location,
+            name: self.name.clone(),
+            on_conflict: self.on_conflict.wire(),
+            subfolder: self.subfolder.clone(),
+            add_to_catalog: self.add_to_catalog,
+        })
+    }
+}
+
+fn parse_dimensions(text: &str) -> Result<(u32, u32), String> {
+    let invalid = || "must look like 1920x1080".to_string();
+    let (width, height) = text.split_once(['x', 'X']).ok_or_else(invalid)?;
+    let pixels = |part: &str| {
+        part.parse::<u32>()
+            .ok()
+            .filter(|px| (1..=export::MAX_PIXELS).contains(px))
+            .ok_or_else(|| format!("each side must be 1 to {}", export::MAX_PIXELS))
+    };
+    Ok((pixels(width)?, pixels(height)?))
+}
+
+fn parse_megapixels(text: &str) -> Result<f64, String> {
+    text.parse::<f64>()
+        .ok()
+        .filter(|mp| mp.is_finite() && *mp > 0.0 && *mp <= export::MAX_MEGAPIXELS)
+        .ok_or_else(|| format!("must be above 0 and at most {}", export::MAX_MEGAPIXELS))
+}
+
 #[derive(Args)]
 struct TargetArgs {
     /// Photo id (repeatable)
@@ -1116,6 +1446,22 @@ async fn run(cli: Cli, json: bool) -> u8 {
                 Err(e) => Err(e),
             };
             output::emit(result, json, output::preview)
+        }
+        Command::Export(args) => {
+            let result = match args.target.ids() {
+                Ok(ids) => {
+                    ctx.timeout = cli.timeout.map_or_else(
+                        || export::default_timeout(ids.as_deref()),
+                        Duration::from_secs_f64,
+                    );
+                    match args.options(ids) {
+                        Ok(options) => export::run(&ctx, &options).await,
+                        Err(e) => Err(e),
+                    }
+                }
+                Err(e) => Err(e),
+            };
+            output::emit(result, json, output::export)
         }
         Command::Apply(args) => {
             let run = write_run(&command_line, args.preview, args.compare, cli.timeout);

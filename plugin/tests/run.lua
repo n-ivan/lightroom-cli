@@ -8,6 +8,7 @@ local Photos = require 'Photos'
 local SearchCriteria = require 'SearchCriteria'
 local Targets = require 'Targets'
 local Preview = require 'Preview'
+local Export = require 'Export'
 local Writes = require 'Writes'
 local DevelopActions = require 'DevelopActions'
 
@@ -1163,6 +1164,168 @@ test('develop actions: module names and controller name fallback', function()
   badRequest(DevelopActions.parseModule, {})
   eq(DevelopActions.alternateName('Exposure2012'), 'Exposure')
   eq(DevelopActions.alternateName('Tint'), nil)
+end)
+
+local function exportArgs(extra)
+  local args = { dest = '/tmp/out', format = 'JPEG' }
+  for k, v in pairs(extra or {}) do
+    args[k] = v
+  end
+  return args
+end
+
+local function parseExport(extra)
+  return Export.parseArgs(exportArgs(extra), function()
+    return true
+  end)
+end
+
+local function exportMessage(extra)
+  local err = badRequest(Export.parseArgs, exportArgs(extra), function()
+    return true
+  end)
+  eq(err.code, 'bad_request')
+  return err.message
+end
+
+test('export: defaults build a full-size quality 90 sRGB JPEG', function()
+  local s = Export.exportSettings(parseExport())
+  eq(s.LR_format, 'JPEG')
+  eq(s.LR_jpeg_quality, 0.9)
+  eq(s.LR_export_colorSpace, 'sRGB')
+  eq(s.LR_size_doConstrain, false)
+  eq(s.LR_embeddedMetadataOption, 'all')
+  eq(s.LR_removeLocationMetadata, false)
+  eq(s.LR_tokens, '{{image_name}}')
+  eq(s.LR_renamingTokensOn, true)
+  eq(s.LR_collisionHandling, 'rename')
+  eq(s.LR_export_destinationType, 'specificFolder')
+  eq(s.LR_export_destinationPathPrefix, '/tmp/out')
+  eq(s.LR_export_useSubfolder, false)
+  eq(s.LR_reimportExportedPhoto, false)
+  eq(s.LR_useWatermark, false)
+  eq(s.LR_includeVideoFiles, false)
+  eq(s.LR_outputSharpeningOn, false)
+  eq(s.LR_export_bitDepth, nil)
+end)
+
+test('export: size modes set the matching keys', function()
+  local s = Export.exportSettings(parseExport({ size = { type = 'longEdge', value = 2048 } }))
+  eq(s.LR_size_doConstrain, true)
+  eq(s.LR_size_resizeType, 'longEdge')
+  eq(s.LR_size_maxWidth, 2048)
+  eq(s.LR_size_maxHeight, 2048)
+  s = Export.exportSettings(parseExport({ size = { type = 'shortEdge', value = 1000 } }))
+  eq(s.LR_size_resizeType, 'shortEdge')
+  eq(s.LR_size_maxHeight, 1000)
+  s = Export.exportSettings(parseExport({ size = { type = 'dimensions', width = 1920, height = 1080 } }))
+  eq(s.LR_size_resizeType, 'dimensions')
+  eq(s.LR_size_maxWidth, 1920)
+  eq(s.LR_size_maxHeight, 1080)
+  s = Export.exportSettings(parseExport({ size = { type = 'megapixels', value = 12.5 } }))
+  eq(s.LR_size_resizeType, 'megapixels')
+  eq(s.LR_size_megapixels, 12.5)
+end)
+
+test('export: size validation', function()
+  exportMessage({ size = { type = 'wh', value = 5 } })
+  exportMessage({ size = { type = 'longEdge', value = 0 } })
+  exportMessage({ size = { type = 'longEdge', value = 1.5 } })
+  exportMessage({ size = { type = 'dimensions', width = 100 } })
+  exportMessage({ size = { type = 'megapixels', value = 0 } })
+  exportMessage({ size = 'big' })
+end)
+
+test('export: TIFF settings', function()
+  local s = Export.exportSettings(parseExport({
+    format = 'TIFF', bitDepth = 16, tiffCompression = 'compressionMethod_ZIP',
+    colorSpace = 'AdobeRGB',
+  }))
+  eq(s.LR_format, 'TIFF')
+  eq(s.LR_export_bitDepth, 16)
+  eq(s.LR_tiff_compressionMethod, 'compressionMethod_ZIP')
+  eq(s.LR_export_colorSpace, 'AdobeRGB')
+  eq(s.LR_jpeg_quality, nil)
+end)
+
+test('export: format-specific options are rejected for other formats', function()
+  assert(exportMessage({ format = 'TIFF', quality = 80 }):find('JPEG'))
+  assert(exportMessage({ bitDepth = 8 }):find('TIFF and PSD'))
+  assert(exportMessage({ format = 'PSD', tiffCompression = 'compressionMethod_LZW' }):find('TIFF'))
+  eq(parseExport({ format = 'PSD', bitDepth = 8 }).bitDepth, 8)
+end)
+
+test('export: bad values name the allowed ones', function()
+  assert(exportMessage({ format = 'PNG' }):find('"JPEG", "TIFF", "PSD", "DNG", "ORIGINAL"', 1, true))
+  assert(exportMessage({ colorSpace = 'p3' }):find('"sRGB", "AdobeRGB", "ProPhotoRGB"', 1, true))
+  assert(exportMessage({ metadata = 'none' }):find('"allExceptCameraInfo"', 1, true))
+  assert(exportMessage({ onConflict = 'ask' }):find('"rename", "overwrite", "skip"', 1, true))
+  assert(exportMessage({ format = 'TIFF', tiffCompression = 'lzw' }):find('compressionMethod_LZW', 1, true))
+  exportMessage({ quality = 101 })
+  exportMessage({ quality = 80.5 })
+  exportMessage({ format = 'TIFF', bitDepth = 12 })
+  exportMessage({ sharpen = { media = 'paper' } })
+  exportMessage({ sharpen = { media = 'screen', level = 4 } })
+  exportMessage({ removeLocation = 'yes' })
+  badRequest(Export.parseArgs, { dest = '/tmp/out' }, function()
+    return true
+  end)
+end)
+
+test('export: quality, sharpening, metadata, naming, conflicts', function()
+  local s = Export.exportSettings(parseExport({
+    quality = 75, sharpen = { media = 'glossy', level = 3 }, metadata = 'allExceptCameraInfo',
+    removeLocation = true, name = '{{date_YYYYMMDD}}-{{naming_sequenceNumber_3Digits}}',
+    onConflict = 'skip', subfolder = 'web', addToCatalog = true,
+  }))
+  eq(s.LR_jpeg_quality, 0.75)
+  eq(s.LR_outputSharpeningOn, true)
+  eq(s.LR_outputSharpeningMedia, 'glossy')
+  eq(s.LR_outputSharpeningLevel, 3)
+  eq(s.LR_embeddedMetadataOption, 'allExceptCameraInfo')
+  eq(s.LR_removeLocationMetadata, true)
+  eq(s.LR_tokens, '{{date_YYYYMMDD}}-{{naming_sequenceNumber_3Digits}}')
+  eq(s.LR_collisionHandling, 'skip')
+  eq(s.LR_export_useSubfolder, true)
+  eq(s.LR_export_destinationPathSuffix, 'web')
+  eq(s.LR_reimportExportedPhoto, true)
+end)
+
+test('export: name and subfolder validation', function()
+  exportMessage({ name = '' })
+  assert(exportMessage({ name = '{{custom_token}}-x' }):find('custom_token'))
+  exportMessage({ name = 'a/b' })
+  exportMessage({ subfolder = '/abs' })
+  exportMessage({ subfolder = '../up' })
+end)
+
+test('export: dest must be an absolute existing directory', function()
+  badRequest(Export.parseArgs, { format = 'JPEG' }, function()
+    return true
+  end)
+  badRequest(Export.parseArgs, { format = 'JPEG', dest = 'rel' }, function()
+    return true
+  end)
+  local err = badRequest(Export.parseArgs, exportArgs(), function()
+    return false
+  end)
+  assert(err.message:find('/tmp/out', 1, true))
+end)
+
+test('export: photo count limit and reply shape', function()
+  Export.checkCount(500)
+  eq(pcall(Export.checkCount, 501), false)
+  local infos = { { id = 1, filename = 'a.ARW' }, { id = 2, filename = 'v.mov', skipReason = 'Videos cannot be exported.' } }
+  local entries = Export.entries(infos, { [1] = { path = '/o/a.jpg' } }, { onConflict = 'rename' })
+  eq(entries[1].file, '/o/a.jpg')
+  eq(entries[2].error, 'Videos cannot be exported.')
+  local missing = { { id = 3, filename = 'b.ARW' } }
+  eq(Export.entries(missing, {}, { onConflict = 'skip' })[1].skipped, true)
+  eq(Export.entries(missing, {}, { onConflict = 'skip' })[1].error, json.null)
+  assert(Export.entries(missing, {}, { onConflict = 'rename' })[1].error ~= json.null)
+  local reply = Export.reply('ids', { dest = '/o' }, entries)
+  eq(reply.dest, '/o')
+  eq(reply.target, 'ids')
 end)
 
 test('Version matches Info.lua', function()

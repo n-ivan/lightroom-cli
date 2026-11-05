@@ -428,6 +428,63 @@ pub fn preview(value: &Value) -> String {
     lines.join("\n")
 }
 
+fn human_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    let b = bytes as f64;
+    if b >= KB * KB {
+        format!("{:.1} MB", b / (KB * KB))
+    } else if b >= KB {
+        format!("{:.1} KB", b / KB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn export_line(photo: &Value) -> String {
+    let name = str_at(photo, "filename").unwrap_or("?");
+    let id = photo
+        .get("id")
+        .map_or_else(|| "?".to_string(), Value::to_string);
+    if photo.get("skipped").and_then(Value::as_bool) == Some(true) {
+        return format!("{name} ({id})  skipped: a file with that name already exists");
+    }
+    let Some(file) = str_at(photo, "file") else {
+        return format!(
+            "{name} ({id})  error: {}",
+            str_at(photo, "error").unwrap_or("no file was exported")
+        );
+    };
+    let mut line = format!("{name} ({id})  {file}");
+    if let Some(bytes) = photo.get("bytes").and_then(Value::as_u64) {
+        line.push_str(&format!("  {}", human_bytes(bytes)));
+    }
+    line
+}
+
+pub fn export(value: &Value) -> String {
+    let photos = photos_of(value);
+    let mut lines: Vec<String> = photos.iter().map(export_line).collect();
+    let exported = photos
+        .iter()
+        .filter(|p| str_at(p, "file").is_some())
+        .count();
+    let skipped = photos
+        .iter()
+        .filter(|p| p.get("skipped").and_then(Value::as_bool) == Some(true))
+        .count();
+    let skipped_note = if skipped > 0 {
+        format!(" ({skipped} skipped)")
+    } else {
+        String::new()
+    };
+    lines.push(format!(
+        "Exported {exported} of {} to {}{skipped_note}",
+        photos.len(),
+        str_at(value, "dest").unwrap_or("?")
+    ));
+    lines.join("\n")
+}
+
 fn photo_label(photo: &Value) -> String {
     format!(
         "{} (id {})",
@@ -885,6 +942,24 @@ mod tests {
             search(&json!({ "total": 0, "offset": 0, "photos": [] })),
             "No photos match."
         );
+    }
+
+    #[test]
+    fn export_lines_show_sizes_errors_and_the_footer() {
+        let reply = json!({ "dest": "/out", "photos": [
+            { "id": 149, "filename": "DSC08011-2.ARW", "file": "/out/DSC08011-2.jpg", "bytes": 3_355_443 },
+            { "id": 150, "filename": "small.ARW", "file": "/out/small.jpg", "bytes": 512 },
+            { "id": 151, "filename": "v.mov", "file": null, "error": "Videos cannot be exported." },
+        ] });
+        let lines: Vec<String> = export(&reply).lines().map(String::from).collect();
+        assert_eq!(
+            lines[0],
+            "DSC08011-2.ARW (149)  /out/DSC08011-2.jpg  3.2 MB"
+        );
+        assert_eq!(lines[1], "small.ARW (150)  /out/small.jpg  512 B");
+        assert_eq!(lines[2], "v.mov (151)  error: Videos cannot be exported.");
+        assert_eq!(lines[3], "Exported 2 of 3 to /out");
+        assert_eq!(human_bytes(2048), "2.0 KB");
     }
 
     #[test]

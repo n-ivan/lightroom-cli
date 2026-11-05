@@ -43,6 +43,9 @@ Lightroom.
   assembly.
 - `PreviewHandler.lua`: the `preview` command (export session or cached
   thumbnails); merged in by `Handlers.lua`.
+- `Export.lua` (pure): `export` arg validation, export settings table.
+  `ExportHandler.lua`: the `export` command. `Rendering.lua`: the shared
+  `LrExportSession` run and photo info lookup (used by `preview` too).
 - `StatusMenuItem.lua`: the File > Plug-in Extras > "lrcli Status…" item;
   it also makes `LrForceInitPlugin` effective (see gotchas).
 - `plugin/tests/run.lua`: luajit tests, run from the repo root.
@@ -130,6 +133,11 @@ counts as unsupported unless verified live.
   as plain tables (`Writes.plain`); otherwise `withWriteAccessDo` hangs on commit.
 - `LR_jpeg_quality` is 0..1, not 0..100. `LR_size_resizeType = 'longEdge'` is
   constrained by `LR_size_maxHeight`, so set both max values.
+- The SDK guide's `LRtiff_compressionMethod` is a typo: Lightroom only honours
+  `LR_tiff_compressionMethod`. Verify export settings by inspecting the output
+  file, since Lightroom silently ignores unknown keys.
+- Never export with `LR_collisionHandling = 'ask'`: Lightroom opens a dialog
+  and the export blocks until someone answers it.
 - Server commands run in their own task so the loop keeps ticking; only `ping`
   is answered while one runs (`Dispatch.nextIndex`).
 - `catalog:withWriteAccessDo` returns "aborted" (not an error) when write access

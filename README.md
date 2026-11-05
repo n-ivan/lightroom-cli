@@ -86,6 +86,8 @@ lrcli selection                                                # what is selecte
 lrcli info --photo 42 --develop                                # metadata, EXIF, develop settings
 lrcli settings --panel basic --photo 42                        # develop setting names by panel, with ranges and current values
 lrcli preview --photo 42 --size 1200                           # JPEG preview with current edits, plus stats
+lrcli export --photo 42 --dest ~/Exports --long-edge 2048      # web JPEGs (quality 90, sRGB) with current edits
+lrcli export --dest ~/Exports/print --format tiff --bit-depth 16 --color-space adobergb  # selection as 16-bit TIFFs
 lrcli apply --photo 42 Exposure2012+=0.5 Contrast2012=15 --preview  # edit develop settings, then render a preview
 lrcli apply --photo 42 Exposure2012+=0.5 --compare             # before/after image (left = before, right = after) plus stats
 lrcli compare before.jpg after.jpg [--out PATH]                # side-by-side JPEG of two images, plus stats
@@ -110,7 +112,11 @@ Photos are identified by the catalog's local id (the `ID` column of `search`).
 from stdin (one per line, or the JSON from `search --json`). `info` without ids
 acts on the current selection. `preview` writes JPEGs under
 `~/.lrcli/previews/` and prints their paths with luminance and clipping stats;
-`--fast` uses Lightroom's cached preview, which can be stale after edits. Run `lrcli <command> --help` for all options.
+`--fast` uses Lightroom's cached preview, which can be stale after edits.
+`export` renders photos to a folder with Lightroom's export (format, size,
+color space, sharpening, metadata, file naming, conflict handling); it never
+overwrites unless `--on-conflict overwrite`, and `--add-to-catalog` changes the
+catalog in a way `undo` cannot revert. Run `lrcli <command> --help` for all options.
 
 Editing commands (`apply`, `preset`, `develop`, `tag`, `rate`, `flag`, `label`) take the same
 `--photo`/`--photos -` targets and default to the current selection. Each writes

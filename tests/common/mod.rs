@@ -207,10 +207,10 @@ impl FakePlugin {
     }
 }
 
-/// Replaces `{dir}` in a canned body with the request's `dir` and writes a
-/// tiny mid-grey JPEG at every `photos[].file`, as the real plugin would.
+/// Replaces `{dir}` in a canned body with the request's `dir` (or `dest`) and
+/// writes a tiny mid-grey JPEG at every `photos[].file`, as the real plugin would.
 fn materialize_files(body: Value, args: &Value) -> Value {
-    let Some(dir) = args["dir"].as_str() else {
+    let Some(dir) = args["dir"].as_str().or(args["dest"].as_str()) else {
         return body;
     };
     let body: Value = serde_json::from_str(&body.to_string().replace("{dir}", dir)).unwrap();
