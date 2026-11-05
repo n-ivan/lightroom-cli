@@ -70,7 +70,7 @@ in `API Reference/modules/*.html` (e.g. `LrCatalog.html` for `findPhotos`
 criteria), guide in `Manual/` (searchable text in `guide.txt`, extracted with
 `swift pdftext.swift <pdf>`; export setting keys are in chapter 3), examples in
 `Sample Plugins/`. If it's missing,
-ask the user for it. Anything the docs don't cover (e.g. `getPhotoByLocalId`)
+ask the user for it. Anything the docs don't cover (e.g. `getPhotoByLocalId`, see gotchas)
 counts as unsupported unless verified live.
 
 ## Lightroom SDK gotchas (verified on LrC 15.6, macOS)
@@ -96,6 +96,10 @@ counts as unsupported unless verified live.
   window has been activated once: `lrcli start` launches with `open -g` and
   activates Lightroom for 0.2 s, then returns focus. A background launch alone
   never initialises the plugin.
+- `catalog:getPhotoByLocalId(id)` is undocumented but present (LrC 15.6). For
+  an unknown id it returns a placeholder LrPhoto, not nil; a real photo has a
+  `uuid`. `Targets.finder` uses it and falls back to scanning `getAllPhotos()`
+  if the method disappears.
 - Lightroom indexes a plugin's `.lua` files at startup: Reload Plug-in picks up
   edits to existing files, but a newly added file fails with "Could not load
   toolkit script: <name>" until Lightroom restarts (use `lrcli restart`). On any init failure,

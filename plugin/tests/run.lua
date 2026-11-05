@@ -476,6 +476,20 @@ test('writes: knownKeyTypes merges documented and live keys', function()
   eq(types.ToneCurvePV2012, nil)
 end)
 
+test('targets: finder uses getPhotoByLocalId and rejects placeholders', function()
+  local real = { localIdentifier = 7, getRawMetadata = function(_, key) return key == 'uuid' and 'U-7' or nil end }
+  local placeholder = { localIdentifier = 9, getRawMetadata = function() return nil end }
+  local scanned = false
+  local catalog = {
+    getPhotoByLocalId = function(_, id) return id == 7 and real or placeholder end,
+    getAllPhotos = function() scanned = true return {} end,
+  }
+  local find = Targets.finder(catalog)
+  eq(find(7), real)
+  eq(find(9), nil)
+  eq(scanned, false)
+end)
+
 test('targets: parseIds', function()
   eq(Targets.parseIds(nil), nil)
   eq(Targets.parseIds(json.null), nil)

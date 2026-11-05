@@ -31,20 +31,37 @@ function Targets.parseIds(value)
   return ids
 end
 
--- The SDK documents no lookup by localIdentifier, so index the whole catalog.
-function Targets.index(catalog)
-  local byId = {}
-  for _, photo in ipairs(catalog:getAllPhotos()) do
-    byId[photo.localIdentifier] = photo
+-- catalog:getPhotoByLocalId is undocumented but present in LrC 15.6. For an
+-- unknown id it returns a placeholder LrPhoto rather than nil; only real photos
+-- have a uuid. Without the method, fall back to indexing the whole catalog
+-- (the documented route), at most once per finder.
+function Targets.finder(catalog)
+  if type(catalog.getPhotoByLocalId) == 'function' then
+    return function(id)
+      local photo = catalog:getPhotoByLocalId(id)
+      if photo and photo:getRawMetadata('uuid') ~= nil then
+        return photo
+      end
+      return nil
+    end
   end
-  return byId
+  local byId
+  return function(id)
+    if not byId then
+      byId = {}
+      for _, photo in ipairs(catalog:getAllPhotos()) do
+        byId[photo.localIdentifier] = photo
+      end
+    end
+    return byId[id]
+  end
 end
 
 function Targets.lookup(catalog, ids)
-  local byId = Targets.index(catalog)
+  local find = Targets.finder(catalog)
   local photos, missing = {}, {}
   for _, id in ipairs(ids) do
-    local photo = byId[id]
+    local photo = find(id)
     if photo then
       photos[#photos + 1] = photo
     else

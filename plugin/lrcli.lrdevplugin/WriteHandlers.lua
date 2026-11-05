@@ -272,10 +272,10 @@ function WriteHandlers.new()
   function handlers.restore(args)
     local changes = Writes.parseRestore(args)
     local catalog = LrApplication.activeCatalog()
-    local byId = Targets.index(catalog)
+    local find = Targets.finder(catalog)
     local photos = {}
     for _, change in ipairs(changes) do
-      photos[#photos + 1] = byId[change.id]
+      photos[#photos + 1] = find(change.id)
     end
     local infos = Targets.describe(catalog, photos)
     local infoById = {}
@@ -373,10 +373,10 @@ function WriteHandlers.new()
     if not LrUndo.canUndo() then
       return { native = false, reason = 'nothing to undo' }
     end
-    local byId = Targets.index(LrApplication.activeCatalog())
+    local find = Targets.finder(LrApplication.activeCatalog())
     local function firstMismatch(label, items)
       for _, expected in ipairs(items) do
-        local photo = byId[expected.id]
+        local photo = find(expected.id)
         if not photo then
           return label .. ': photo ' .. expected.id .. ' is no longer in the catalog'
         end
